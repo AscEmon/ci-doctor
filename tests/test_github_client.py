@@ -1,7 +1,8 @@
 import httpx
+import pytest
 from pydantic import SecretStr
 
-from cidoc.github_client import GitHubClient
+from cidoc.github_client import GitHubClient, RetryableHTTPError
 
 # Fake value for tests only; never put real credentials here.
 FAKE_TOKEN = SecretStr("test-github-token-value")
@@ -47,3 +48,82 @@ def test_repr_does_not_expose_token() -> None:
     client = make_client(httpx.MockTransport(lambda r: httpx.Response(200)))
     assert "test-github-token-value" not in repr(client)
     client.close()
+
+
+def make_retrying_client(
+    responses: list[httpx.Response], sleeps: list[float], max_attempts: int = 5
+) -> tuple[GitHubClient, list[httpx.Request]]:
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return responses[len(seen) - 1]
+
+    client = GitHubClient(
+        FAKE_TOKEN,
+        transport=httpx.MockTransport(handler),
+        max_attempts=max_attempts,
+        sleep=sleeps.append,
+    )
+    return client, seen
+
+
+def test_retries_5xx_with_exponential_backoff() -> None:
+    sleeps: list[float] = []
+    responses = [httpx.Response(502), httpx.Response(503), httpx.Response(200, json={})]
+    client, seen = make_retrying_client(responses, sleeps)
+
+    with client:
+        assert client.get_json("/x") == {}
+
+    assert len(seen) == 3
+    assert sleeps == [1.0, 2.0]
+
+
+def test_secondary_rate_limit_honors_retry_after() -> None:
+    sleeps: list[float] = []
+    responses = [
+        httpx.Response(403, headers={"Retry-After": "7"}, json={"message": "slow down"}),
+        httpx.Response(200, json={}),
+    ]
+    client, _ = make_retrying_client(responses, sleeps)
+
+    with client:
+        client.get_json("/x")
+
+    assert sleeps == [7.0]
+
+
+def test_secondary_rate_limit_without_retry_after_waits_a_minute() -> None:
+    sleeps: list[float] = []
+    responses = [
+        httpx.Response(429, json={"message": "You have exceeded a secondary rate limit."}),
+        httpx.Response(200, json={}),
+    ]
+    client, _ = make_retrying_client(responses, sleeps)
+
+    with client:
+        client.get_json("/x")
+
+    assert sleeps == [60.0]
+
+
+def test_gives_up_after_max_attempts() -> None:
+    sleeps: list[float] = []
+    client, seen = make_retrying_client([httpx.Response(500)] * 3, sleeps, max_attempts=3)
+
+    with client, pytest.raises(RetryableHTTPError):
+        client.get_json("/x")
+
+    assert len(seen) == 3
+
+
+def test_does_not_retry_client_errors() -> None:
+    sleeps: list[float] = []
+    client, seen = make_retrying_client([httpx.Response(404)], sleeps)
+
+    with client, pytest.raises(httpx.HTTPStatusError):
+        client.get_json("/x")
+
+    assert len(seen) == 1
+    assert sleeps == []
