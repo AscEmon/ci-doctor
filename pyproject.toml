@@ -16,6 +16,9 @@ dependencies = [
     "typer",
 ]
 
+[project.scripts]
+cidoc = "cidoc.cli:app"
+
 [dependency-groups]
 dev = [
     "mypy",
