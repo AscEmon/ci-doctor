@@ -1,0 +1,58 @@
+[project]
+name = "ci-doctor"
+version = "0.1.0"
+description = "Diagnose CI failures from GitHub Actions logs"
+authors = [
+    { name = "Abu Sayed", email = "sayedemon53@gmail.com" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "anthropic",
+    "httpx",
+    "pydantic",
+    "pydantic-settings",
+    "rich",
+    "tenacity",
+    "typer",
+]
+
+[dependency-groups]
+dev = [
+    "mypy",
+    "pytest",
+    "ruff",
+]
+
+[build-system]
+requires = ["uv_build>=0.13.6,<0.14.0"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "cidoc"
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "N", "S", "SIM", "RUF"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+mypy_path = "src"
+packages = ["cidoc", "tests"]
+plugins = ["pydantic.mypy"]
+
+[tool.pydantic-mypy]
+init_forbid_extra = true
+init_typed = true
+warn_required_dynamic_aliases = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
