@@ -127,3 +127,66 @@ def test_does_not_retry_client_errors() -> None:
 
     assert len(seen) == 1
     assert sleeps == []
+
+
+FAKE_NOW = 1_700_000_000.0
+
+
+def make_rate_limited_client(
+    responses: list[httpx.Response], sleeps: list[float]
+) -> tuple[GitHubClient, list[httpx.Request]]:
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return responses[len(seen) - 1]
+
+    client = GitHubClient(
+        FAKE_TOKEN,
+        transport=httpx.MockTransport(handler),
+        sleep=sleeps.append,
+        clock=lambda: FAKE_NOW,
+    )
+    return client, seen
+
+
+def exhausted_headers(reset_in: int) -> dict[str, str]:
+    return {"X-RateLimit-Remaining": "0", "X-RateLimit-Reset": str(int(FAKE_NOW) + reset_in)}
+
+
+def test_primary_rate_limit_sleeps_until_reset_then_retries() -> None:
+    sleeps: list[float] = []
+    responses = [
+        httpx.Response(403, headers=exhausted_headers(120), json={"message": "API rate limit"}),
+        httpx.Response(200, json={}),
+    ]
+    client, seen = make_rate_limited_client(responses, sleeps)
+
+    with client:
+        assert client.get_json("/x") == {}
+
+    assert len(seen) == 2
+    assert sleeps == [121.0]
+
+
+def test_successful_response_with_zero_remaining_sleeps_until_reset() -> None:
+    sleeps: list[float] = []
+    responses = [httpx.Response(200, headers=exhausted_headers(30), json={"n": 1})]
+    client, seen = make_rate_limited_client(responses, sleeps)
+
+    with client:
+        assert client.get_json("/x") == {"n": 1}
+
+    assert len(seen) == 1
+    assert sleeps == [31.0]
+
+
+def test_does_not_sleep_when_quota_remains() -> None:
+    sleeps: list[float] = []
+    headers = {"X-RateLimit-Remaining": "42", "X-RateLimit-Reset": str(int(FAKE_NOW) + 30)}
+    client, _ = make_rate_limited_client([httpx.Response(200, headers=headers, json={})], sleeps)
+
+    with client:
+        client.get_json("/x")
+
+    assert sleeps == []
