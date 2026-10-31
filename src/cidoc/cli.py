@@ -8,6 +8,7 @@ from typing import Annotated
 
 import typer
 from rich.console import Console
+from rich.table import Table
 
 from cidoc.config import get_settings
 from cidoc.db import DB_FILENAME, connect
@@ -15,6 +16,7 @@ from cidoc.github_client import GitHubClient
 from cidoc.miner.discover import RepoInfo, discover
 from cidoc.miner.runs import FailedJob, mine_repo, repos_to_mine
 from cidoc.miner.seeds import SEED_FILENAME, add_seed_repos
+from cidoc.miner.stats import collect_stats, pct
 
 app = typer.Typer(
     help="ci-doctor: diagnose CI failures from GitHub Actions logs.", no_args_is_help=True
@@ -113,3 +115,43 @@ def mine_runs(
         raise typer.Exit(130) from None
     finally:
         conn.close()
+
+
+def count_table(title: str, label: str, rows: list[tuple[str, int]], total: int) -> Table:
+    table = Table(title=title)
+    table.add_column(label)
+    table.add_column("jobs", justify="right")
+    table.add_column("%", justify="right")
+    for name, count in rows:
+        table.add_row(name, str(count), f"{pct(count, total):.1f}")
+    return table
+
+
+@mine_app.command("stats")
+def mine_stats(
+    top_steps: Annotated[int, typer.Option(help="How many failed step names to list.")] = 20,
+) -> None:
+    """Summarize mined failures per repo, runner OS, and failed step."""
+    conn = open_db()
+    try:
+        stats = collect_stats(conn, top_steps=top_steps)
+    finally:
+        conn.close()
+
+    console.print(
+        f"{stats.jobs} failed jobs across {stats.repos} repos; "
+        f"{stats.with_fix} ({pct(stats.with_fix, stats.jobs):.1f}%) have a fix_sha; "
+        f"{stats.redactions} secrets redacted."
+    )
+
+    repos = Table(title="Per repo")
+    repos.add_column("repo")
+    repos.add_column("jobs", justify="right")
+    repos.add_column("with fix_sha", justify="right")
+    for r in stats.per_repo:
+        repos.add_row(r.repo, str(r.jobs), f"{r.with_fix} ({pct(r.with_fix, r.jobs):.0f}%)")
+    console.print(repos)
+    console.print(count_table("Per runner OS", "runner_os", stats.per_runner_os, stats.jobs))
+    console.print(
+        count_table(f"Top {top_steps} failed steps", "step", stats.per_failed_step, stats.jobs)
+    )
