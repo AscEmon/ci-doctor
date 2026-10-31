@@ -3,6 +3,7 @@
 import sqlite3
 from datetime import UTC, datetime
 from importlib.metadata import version
+from pathlib import Path
 from typing import Annotated
 
 import typer
@@ -12,6 +13,7 @@ from cidoc.config import get_settings
 from cidoc.db import DB_FILENAME, connect
 from cidoc.github_client import GitHubClient
 from cidoc.miner.discover import RepoInfo, discover
+from cidoc.miner.seeds import SEED_FILENAME, add_seed_repos
 
 app = typer.Typer(
     help="ci-doctor: diagnose CI failures from GitHub Actions logs.", no_args_is_help=True
@@ -44,6 +46,11 @@ def show_version() -> None:
 @mine_app.command("discover")
 def mine_discover(
     limit: Annotated[int, typer.Option(help="Max search results to check (API cap: 1000).")] = 300,
+    seed_file: Annotated[
+        Path | None,
+        typer.Option(help=f"owner/repo list to add as-is (default: <data_dir>/{SEED_FILENAME})."),
+    ] = None,
+    search: Annotated[bool, typer.Option(help="Run the GitHub search step.")] = True,
 ) -> None:
     """Find Dart repos with Flutter workflows and store them in the repos table."""
 
@@ -51,10 +58,22 @@ def mine_discover(
         mark = "[green]keep[/green]" if kept else "[dim]skip[/dim]"
         console.print(f"{mark} {repo.full_name} ({repo.stars}★)")
 
+    def report_missing(name: str) -> None:
+        console.print(f"[yellow]seed not found[/yellow] {name}")
+
+    seed_path = seed_file or get_settings().data_dir / SEED_FILENAME
+    if seed_file and not seed_file.exists():
+        raise typer.BadParameter(f"{seed_file} does not exist", param_hint="--seed-file")
+
+    now = datetime.now(UTC)
     conn = open_db()
     try:
         with open_github() as client:
-            added = discover(client, conn, datetime.now(UTC), limit, on_checked=report)
+            if seed_path.exists():
+                seeded = add_seed_repos(client, conn, seed_path, now, on_missing=report_missing)
+                console.print(f"Added {seeded} seed repos from {seed_path}.")
+            if search:
+                added = discover(client, conn, now, limit, on_checked=report)
+                console.print(f"Added {added} repos from search.")
     finally:
         conn.close()
-    console.print(f"Added {added} repos.")
