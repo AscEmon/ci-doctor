@@ -67,6 +67,8 @@ def make_client(
         path = request.url.path
         if path == f"/repos/{REPO}/actions/runs":
             return httpx.Response(200, json={"workflow_runs": runs})
+        if path.startswith(f"/repos/{REPO}/actions/workflows/"):
+            return httpx.Response(200, json={"workflow_runs": []})
         if path.endswith("/jobs"):
             run_id = int(path.split("/")[-2])
             return httpx.Response(200, json={"jobs": jobs[run_id]})

@@ -13,6 +13,7 @@ from typing import Any
 import httpx
 
 from cidoc.github_client import GitHubClient
+from cidoc.miner.fixpair import FixPairFinder
 from cidoc.redact import redact
 
 # GitHub deletes run logs after 90 days by default.
@@ -175,8 +176,10 @@ def mine_repo(
 
     `on_job` is called with the stored job, or None and the job id when its log is gone.
     """
+    since = now - LOG_RETENTION
+    fixes = FixPairFinder(client, repo, since)
     stored = 0
-    for run in list_failed_runs(client, repo, now - LOG_RETENTION, max_runs):
+    for run in list_failed_runs(client, repo, since, max_runs):
         for job in list_failed_jobs(client, repo, run["id"]):
             raw = download_job_log(client, repo, job["id"])
             if raw is None:
@@ -194,7 +197,8 @@ def mine_repo(
                 event=run["event"],
                 head_branch=run.get("head_branch"),
                 head_sha=run["head_sha"],
-                fix_sha=None,
+                # Cached per (workflow, branch), so this costs at most one lookup per branch.
+                fix_sha=fixes.fix_sha(run),
                 failed_steps=failed_step_names(job),
                 runner_os=runner_os_from_labels(job.get("labels") or []),
                 created_at=run["created_at"],
