@@ -1,5 +1,6 @@
 """Typer entrypoint for the `cidoc` command."""
 
+import random
 import sqlite3
 from datetime import UTC, datetime
 from importlib.metadata import version
@@ -13,6 +14,8 @@ from rich.table import Table
 from cidoc.config import get_settings
 from cidoc.db import DB_FILENAME, connect
 from cidoc.github_client import GitHubClient
+from cidoc.labeling.labels import LABELS_FILENAME, load_labels
+from cidoc.labeling.session import load_candidates, pick_stratified, run_session
 from cidoc.miner.discover import RepoInfo, discover
 from cidoc.miner.runs import FailedJob, mine_repo, repos_to_mine
 from cidoc.miner.seeds import SEED_FILENAME, add_seed_repos
@@ -154,4 +157,47 @@ def mine_stats(
     console.print(count_table("Per runner OS", "runner_os", stats.per_runner_os, stats.jobs))
     console.print(
         count_table(f"Top {top_steps} failed steps", "step", stats.per_failed_step, stats.jobs)
+    )
+
+
+@app.command("label")
+def label(
+    n: Annotated[int, typer.Option("--n", help="How many failures to label this session.")] = 50,
+    seed: Annotated[int | None, typer.Option(help="Random seed for a reproducible pick.")] = None,
+) -> None:
+    """Label unlabeled failures by hand; answers are appended to labels.jsonl."""
+    data_dir = get_settings().data_dir
+    labels_path = data_dir / LABELS_FILENAME
+
+    def warn_bad_line(lineno: int) -> None:
+        console.print(f"[yellow]ignoring unreadable line {lineno} in {labels_path}[/yellow]")
+
+    existing = load_labels(labels_path, on_bad_line=warn_bad_line)
+    conn = open_db()
+    try:
+        candidates = load_candidates(conn, exclude={lbl.job_id for lbl in existing})
+    finally:
+        conn.close()
+    rng = random.Random(seed)  # noqa: S311 - sampling order only, not security
+    picks = pick_stratified(candidates, [lbl.repo for lbl in existing], n, rng)
+    if not picks:
+        console.print("Nothing left to label.")
+        return
+
+    console.print(
+        f"{len(existing)} labeled so far; {len(candidates)} unlabeled; picked {len(picks)}."
+    )
+    result = run_session(
+        console,
+        picks,
+        data_dir,
+        labels_path,
+        getch=typer.getchar,
+        ask=console.input,
+        clock=lambda: datetime.now(UTC),
+    )
+    status = "Stopped" if result.quit else "Done"
+    console.print(
+        f"{status}: {result.labeled} labeled, {result.skipped} skipped "
+        f"({len(existing) + result.labeled} total in {labels_path}). Run again to resume."
     )
