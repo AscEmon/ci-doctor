@@ -38,6 +38,10 @@ MIGRATIONS: tuple[str, ...] = (
 
     CREATE INDEX failures_repo_idx ON failures(repo);
     """,
+    """
+    -- Number of secrets masked in the stored log.
+    ALTER TABLE failures ADD COLUMN redactions INTEGER NOT NULL DEFAULT 0;
+    """,
 )
 
 

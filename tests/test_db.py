@@ -38,6 +38,7 @@ def test_connect_creates_db_and_schema(tmp_path: Path) -> None:
         "created_at",
         "log_path",
         "log_bytes",
+        "redactions",
     ]
     conn.close()
 

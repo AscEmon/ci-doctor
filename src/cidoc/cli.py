@@ -13,6 +13,7 @@ from cidoc.config import get_settings
 from cidoc.db import DB_FILENAME, connect
 from cidoc.github_client import GitHubClient
 from cidoc.miner.discover import RepoInfo, discover
+from cidoc.miner.runs import FailedJob, mine_repo, repos_to_mine
 from cidoc.miner.seeds import SEED_FILENAME, add_seed_repos
 
 app = typer.Typer(
@@ -75,5 +76,37 @@ def mine_discover(
             if search:
                 added = discover(client, conn, now, limit, on_checked=report)
                 console.print(f"Added {added} repos from search.")
+    finally:
+        conn.close()
+
+
+@mine_app.command("runs")
+def mine_runs(
+    max_per_repo: Annotated[
+        int, typer.Option(help="Max failed runs to mine per repo (last 90 days).")
+    ] = 30,
+    repo: Annotated[
+        list[str] | None, typer.Option(help="Only mine these owner/repo names (repeatable).")
+    ] = None,
+) -> None:
+    """Download logs for failed jobs of every stored repo into the failures table."""
+    data_dir = get_settings().data_dir
+    now = datetime.now(UTC)
+
+    def report(job: FailedJob | None, job_id: int) -> None:
+        if job is None:
+            console.print(f"  [yellow]log expired[/yellow] job {job_id}")
+            return
+        steps = ", ".join(job.failed_steps) or "?"
+        console.print(f"  job {job_id} [{job.runner_os or '?'}] {job.workflow_name}: {steps}")
+
+    conn = open_db()
+    try:
+        targets = repo or repos_to_mine(conn)
+        with open_github() as client:
+            for name in targets:
+                console.print(f"[bold]{name}[/bold]")
+                stored = mine_repo(client, conn, data_dir, name, now, max_per_repo, report)
+                console.print(f"  stored {stored} failed jobs")
     finally:
         conn.close()
