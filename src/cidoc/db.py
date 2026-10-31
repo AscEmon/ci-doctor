@@ -42,6 +42,14 @@ MIGRATIONS: tuple[str, ...] = (
     -- Number of secrets masked in the stored log.
     ALTER TABLE failures ADD COLUMN redactions INTEGER NOT NULL DEFAULT 0;
     """,
+    """
+    -- Failed runs whose jobs have all been processed (stored or log expired).
+    CREATE TABLE mined_runs (
+        run_id   INTEGER PRIMARY KEY,
+        repo     TEXT NOT NULL REFERENCES repos(full_name),
+        mined_at TEXT NOT NULL
+    );
+    """,
 )
 
 

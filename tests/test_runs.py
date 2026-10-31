@@ -61,10 +61,13 @@ def job(
 def make_client(
     runs: list[dict[str, Any]],
     jobs: dict[int, list[dict[str, Any]]],
-    logs: dict[int, bytes | int],
+    logs: dict[int, bytes | int | BaseException],
+    seen: list[str] | None = None,
 ) -> GitHubClient:
     def handler(request: httpx.Request) -> httpx.Response:
         path = request.url.path
+        if seen is not None:
+            seen.append(path)
         if path == f"/repos/{REPO}/actions/runs":
             return httpx.Response(200, json={"workflow_runs": runs})
         if path.startswith(f"/repos/{REPO}/actions/workflows/"):
@@ -74,6 +77,8 @@ def make_client(
             return httpx.Response(200, json={"jobs": jobs[run_id]})
         if path.endswith("/logs"):
             log = logs[int(path.split("/")[-2])]
+            if isinstance(log, BaseException):
+                raise log
             if isinstance(log, int):
                 return httpx.Response(log, json={"message": "gone"})
             return httpx.Response(200, content=log)
@@ -198,3 +203,57 @@ def test_mine_repo_skips_expired_logs(conn: sqlite3.Connection, tmp_path: Path) 
     assert skipped == [1001]
     assert [r[0] for r in conn.execute("SELECT job_id FROM failures")] == [1002]
     assert not (tmp_path / log_relpath(REPO, 1001)).exists()
+
+
+def stored_jobs(conn: sqlite3.Connection) -> list[int]:
+    return [r[0] for r in conn.execute("SELECT job_id FROM failures ORDER BY job_id")]
+
+
+def test_rerun_after_completion_does_no_work(conn: sqlite3.Connection, tmp_path: Path) -> None:
+    runs = [run(100), run(200)]
+    jobs = {100: [job(1001)], 200: [job(2001)]}
+    logs: dict[int, bytes | int | BaseException] = {1001: b"a\n", 2001: 410}
+    with make_client(runs, jobs, logs) as client:
+        assert mine_repo(client, conn, tmp_path, REPO, NOW, max_runs=30) == 1
+
+    seen: list[str] = []
+    with make_client(runs, jobs, logs, seen) as client:
+        assert mine_repo(client, conn, tmp_path, REPO, NOW, max_runs=30) == 0
+
+    assert seen == [f"/repos/{REPO}/actions/runs"]
+    assert stored_jobs(conn) == [1001]
+
+
+def test_resume_after_interruption_mid_run(conn: sqlite3.Connection, tmp_path: Path) -> None:
+    runs = [run(100)]
+    jobs = {100: [job(1001), job(1002)]}
+    crashing: dict[int, bytes | int | BaseException] = {1001: b"a\n", 1002: KeyboardInterrupt()}
+
+    with make_client(runs, jobs, crashing) as client, pytest.raises(KeyboardInterrupt):
+        mine_repo(client, conn, tmp_path, REPO, NOW, max_runs=30)
+
+    assert stored_jobs(conn) == [1001]
+    assert conn.execute("SELECT count(*) FROM mined_runs").fetchone()[0] == 0
+
+    seen: list[str] = []
+    logs: dict[int, bytes | int | BaseException] = {1001: b"a\n", 1002: b"b\n"}
+    with make_client(runs, jobs, logs, seen) as client:
+        assert mine_repo(client, conn, tmp_path, REPO, NOW, max_runs=30) == 1
+
+    assert f"/repos/{REPO}/actions/jobs/1001/logs" not in seen
+    assert f"/repos/{REPO}/actions/jobs/1002/logs" in seen
+    assert stored_jobs(conn) == [1001, 1002]
+    assert [r[0] for r in conn.execute("SELECT run_id FROM mined_runs")] == [100]
+
+
+def test_mined_runs_count_toward_per_repo_cap(conn: sqlite3.Connection, tmp_path: Path) -> None:
+    runs = [run(100), run(200), run(300)]
+    jobs = {100: [job(1001)], 200: [job(2001)], 300: [job(3001)]}
+    logs: dict[int, bytes | int | BaseException] = {1001: b"a", 2001: b"b", 3001: b"c"}
+
+    with make_client(runs, jobs, logs) as client:
+        assert mine_repo(client, conn, tmp_path, REPO, NOW, max_runs=2) == 2
+        assert mine_repo(client, conn, tmp_path, REPO, NOW, max_runs=2) == 0
+        assert mine_repo(client, conn, tmp_path, REPO, NOW, max_runs=3) == 1
+
+    assert stored_jobs(conn) == [1001, 2001, 3001]

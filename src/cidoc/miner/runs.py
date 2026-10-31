@@ -163,6 +163,23 @@ def insert_failure(conn: sqlite3.Connection, job: FailedJob) -> None:
         )
 
 
+def stored_job_ids(conn: sqlite3.Connection, repo: str) -> set[int]:
+    return {row[0] for row in conn.execute("SELECT job_id FROM failures WHERE repo = ?", (repo,))}
+
+
+def mined_run_ids(conn: sqlite3.Connection, repo: str) -> set[int]:
+    rows = conn.execute("SELECT run_id FROM mined_runs WHERE repo = ?", (repo,))
+    return {row[0] for row in rows}
+
+
+def mark_run_mined(conn: sqlite3.Connection, repo: str, run_id: int, now: datetime) -> None:
+    with conn:
+        conn.execute(
+            "INSERT OR IGNORE INTO mined_runs (run_id, repo, mined_at) VALUES (?, ?, ?)",
+            (run_id, repo, now.isoformat()),
+        )
+
+
 def mine_repo(
     client: GitHubClient,
     conn: sqlite3.Connection,
@@ -174,13 +191,21 @@ def mine_repo(
 ) -> int:
     """Store every failed job from up to `max_runs` recent failed runs. Returns jobs stored.
 
+    Safe to re-run after an interruption: finished runs and stored jobs are skipped, and
+    already-mined runs still count toward `max_runs` so the cap is per repo, not per call.
     `on_job` is called with the stored job, or None and the job id when its log is gone.
     """
     since = now - LOG_RETENTION
     fixes = FixPairFinder(client, repo, since)
+    done_runs = mined_run_ids(conn, repo)
+    done_jobs = stored_job_ids(conn, repo)
     stored = 0
     for run in list_failed_runs(client, repo, since, max_runs):
+        if run["id"] in done_runs:
+            continue
         for job in list_failed_jobs(client, repo, run["id"]):
+            if job["id"] in done_jobs:
+                continue
             raw = download_job_log(client, repo, job["id"])
             if raw is None:
                 if on_job:
@@ -210,6 +235,7 @@ def mine_repo(
             stored += 1
             if on_job:
                 on_job(failure, failure.job_id)
+        mark_run_mined(conn, repo, run["id"], now)
     return stored
 
 

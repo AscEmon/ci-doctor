@@ -63,6 +63,13 @@ def test_migrate_applies_only_pending_scripts() -> None:
     assert tables == {"a", "b"}
 
 
+def test_mined_runs_table_exists(tmp_path: Path) -> None:
+    conn = connect(tmp_path / "cidoc.db")
+
+    assert table_columns(conn, "mined_runs") == ["run_id", "repo", "mined_at"]
+    conn.close()
+
+
 def test_failed_migration_rolls_back() -> None:
     conn = sqlite3.connect(":memory:")
     bad = "CREATE TABLE ok (x INTEGER);\nCREATE TABLE ok (x INTEGER);"

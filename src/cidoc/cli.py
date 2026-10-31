@@ -107,6 +107,9 @@ def mine_runs(
             for name in targets:
                 console.print(f"[bold]{name}[/bold]")
                 stored = mine_repo(client, conn, data_dir, name, now, max_per_repo, report)
-                console.print(f"  stored {stored} failed jobs")
+                console.print(f"  stored {stored} new failed jobs")
+    except KeyboardInterrupt:
+        console.print("[yellow]Interrupted.[/yellow] Progress is saved; rerun to resume.")
+        raise typer.Exit(130) from None
     finally:
         conn.close()
