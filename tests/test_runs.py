@@ -144,7 +144,7 @@ def test_list_failed_runs_respects_limit() -> None:
 def test_mine_repo_stores_failed_jobs_with_redacted_gzipped_logs(
     conn: sqlite3.Connection, tmp_path: Path
 ) -> None:
-    raw_log = f"﻿Step 1\nexport GITHUB_TOKEN={FAKE_GHP}\nBUILD FAILED\n".encode()
+    raw_log = f"\ufeffStep 1\nexport GITHUB_TOKEN={FAKE_GHP}\nBUILD FAILED\n".encode()
     client = make_client(
         runs=[run(100)],
         jobs={100: [job(1001, labels=["macos-14"]), job(1002, conclusion="success")]},
