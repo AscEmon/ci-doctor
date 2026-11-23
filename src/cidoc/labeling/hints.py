@@ -38,7 +38,19 @@ def _rx(pattern: str) -> re.Pattern[str]:
 
 
 RULES: tuple[HintRule, ...] = (
-    HintRule("dependency_resolution", _rx(r"version solving failed")),
+    # pub, then Gradle/Maven artifacts that could not be resolved or downloaded. First, so
+    # it wins over gradle_agp_config: Gradle wraps resolution failures in config errors.
+    HintRule(
+        "dependency_resolution",
+        _rx(
+            r"version solving failed"
+            r"|Could not resolve all (?:artifacts|dependencies|files)"
+            r"|Could not find [\w.\-]+:[\w.\-]+:[\w.\-]+"
+            r"|Could not resolve [\w.\-]+:[\w.\-]+:[\w.\-]+"
+            r"|Could not GET 'https?://"
+            r"|Could not download"
+        ),
+    ),
     HintRule(
         "analyzer_lint",
         _rx(r"\b(?:info|warning|error) •"),
@@ -51,6 +63,18 @@ RULES: tuple[HintRule, ...] = (
     HintRule(
         "toolchain_version",
         _rx(r"requires Java|Unsupported class file major version|minimum supported Gradle"),
+    ),
+    # After signing and toolchain: "Build file '...' line: N" also wraps keystore and
+    # Java/Gradle version errors, which the guideline files under those categories.
+    # The plugin pattern allows ", version: '...'" etc. after the id, as Gradle prints it.
+    HintRule(
+        "gradle_agp_config",
+        _rx(
+            r"Namespace not specified"
+            r"|Plugin \[id: '[^']+'[^\]]*\] was not found"
+            r"|Could not find method \w+\(\) for arguments"
+            r"|Build file '.*' line: \d+"
+        ),
     ),
     # [E] is flutter test's failed-test marker. \btest keeps "latest ... failed" out.
     HintRule("test_failure", _rx(r"Some tests failed|\[E\]|\btest.*failed")),

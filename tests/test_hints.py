@@ -161,15 +161,122 @@ def test_each_pattern(lines: list[str], category: str, matched: str) -> None:
 
 
 def test_every_rule_has_a_fixture() -> None:
-    assert {rule.category for rule in RULES} == {
+    assert [rule.category for rule in RULES] == [
         "dependency_resolution",
         "analyzer_lint",
         "signing_secrets",
         "toolchain_version",
+        "gradle_agp_config",
         "test_failure",
         "ios_build",
         "infra_flaky",
-    }
+    ]
+
+
+REAL_KOTLIN_LINE = "> Could not find org.jetbrains.kotlin:kotlin-stdlib:2.0.21."
+
+
+@pytest.mark.parametrize(
+    ("line", "matched"),
+    [
+        (REAL_KOTLIN_LINE, "Could not find org.jetbrains.kotlin:kotlin-stdlib:2.0.21."),
+        (
+            "> Could not resolve all artifacts for configuration ':classpath'.",
+            "Could not resolve all artifacts",
+        ),
+        (
+            "> Could not resolve all dependencies for configuration ':app:debugRuntimeClasspath'.",
+            "Could not resolve all dependencies",
+        ),
+        (
+            "Execution failed for task ':app:checkDebugAarMetadata'."
+            " > Could not resolve all files for configuration",
+            "Could not resolve all files",
+        ),
+        (
+            "   > Could not resolve com.google.firebase:firebase-bom:33.1.0.",
+            "Could not resolve com.google.firebase:firebase-bom:33.1.0.",
+        ),
+        (
+            "      > Could not GET 'https://dl.google.com/dl/android/maven2/com/android/x.pom'.",
+            "Could not GET 'https://",
+        ),
+        (
+            "Could not download kotlin-compiler-embeddable-1.9.22.jar"
+            " (org.jetbrains.kotlin:kotlin-compiler-embeddable:1.9.22)",
+            "Could not download",
+        ),
+    ],
+)
+def test_gradle_maven_resolution_is_dependency_resolution(line: str, matched: str) -> None:
+    assert hint_of(line) == Hint("dependency_resolution", matched, 1)
+
+
+@pytest.mark.parametrize(
+    ("line", "matched"),
+    [
+        (
+            "Namespace not specified. Specify a namespace in the module's build file.",
+            "Namespace not specified",
+        ),
+        (
+            "Plugin [id: 'dev.flutter.flutter-plugin-loader'] was not found in any of the"
+            " following sources:",
+            "Plugin [id: 'dev.flutter.flutter-plugin-loader'] was not found",
+        ),
+        (
+            "Plugin [id: 'com.android.application', version: '8.1.0', apply: false]"
+            " was not found in any of the following sources:",
+            "Plugin [id: 'com.android.application', version: '8.1.0', apply: false] was ",
+        ),
+        (
+            "> Could not find method implementation() for arguments [project ':core']",
+            "Could not find method implementation() for arguments",
+        ),
+        (
+            "* Where: Build file '/home/runner/work/app/android/app/build.gradle' line: 27",
+            "Build file '/home/runner/work/app/android/app/build.gradle' l",
+        ),
+    ],
+)
+def test_gradle_config_errors(line: str, matched: str) -> None:
+    hint = hint_of(line)
+
+    assert hint is not None
+    assert (hint.category, hint.matched) == ("gradle_agp_config", matched[:60])
+
+
+def test_resolution_failure_inside_build_file_error_is_dependency_resolution() -> None:
+    # Gradle's usual layout: the "Where" points at a build file, the cause is resolution.
+    hint = hint_of(
+        "FAILURE: Build failed with an exception.",
+        "* Where:",
+        "Build file '/home/runner/work/app/android/build.gradle' line: 12",
+        "* What went wrong:",
+        "A problem occurred configuring root project 'android'.",
+        "> Could not resolve all artifacts for configuration ':classpath'.",
+        f"   {REAL_KOTLIN_LINE}",
+    )
+
+    assert hint == Hint("dependency_resolution", "Could not resolve all artifacts", 6)
+
+
+def test_signing_and_toolchain_win_over_build_file_location() -> None:
+    signing = hint_of(
+        "Build file '/app/android/app/build.gradle' line: 40",
+        "> Keystore file '/app/upload.jks' not found for signing config 'release'.",
+    )
+    toolchain = hint_of(
+        "Build file '/app/android/build.gradle' line: 3",
+        "> Android Gradle plugin requires Java 17 to run.",
+    )
+
+    assert signing is not None and signing.category == "signing_secrets"
+    assert toolchain is not None and toolchain.category == "toolchain_version"
+
+
+def test_could_not_find_without_coordinates_is_not_dependency_resolution() -> None:
+    assert hint_of("Could not find a file named 'pubspec.yaml'") is None
 
 
 @pytest.mark.parametrize(
