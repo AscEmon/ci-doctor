@@ -2,6 +2,7 @@
 
 import gzip
 import json
+import logging
 import os
 import sqlite3
 from collections.abc import Callable, Iterator, Sequence
@@ -16,6 +17,8 @@ from cidoc.github_client import GitHubClient
 from cidoc.miner.fixpair import FixPairFinder
 from cidoc.miner.rules import is_fork_run, run_skip_reason
 from cidoc.redact import redact
+
+logger = logging.getLogger(__name__)
 
 # GitHub deletes run logs after 90 days by default.
 LOG_RETENTION = timedelta(days=90)
@@ -49,6 +52,14 @@ class FailedJob:
     log_path: str
     log_bytes: int
     redactions: int
+
+
+@dataclass(frozen=True)
+class MineResult:
+    stored: int
+    """Failed jobs newly stored."""
+    skipped_runs: int
+    """Runs abandoned after an unexpected error; left unmarked so a rerun retries them."""
 
 
 def parse_time(value: str) -> datetime:
@@ -195,55 +206,81 @@ def mine_repo(
     now: datetime,
     max_runs: int,
     on_job: Callable[[FailedJob | None, int], None] | None = None,
-) -> int:
-    """Store every failed job from up to `max_runs` recent failed runs. Returns jobs stored.
+) -> MineResult:
+    """Store every failed job from up to `max_runs` recent failed runs.
 
     Safe to re-run after an interruption: finished runs and stored jobs are skipped, and
     already-mined runs still count toward `max_runs` so the cap is per repo, not per call.
     `on_job` is called with the stored job, or None and the job id when its log is gone.
+
+    An unexpected error inside one run is logged and that run is skipped, so one bad run
+    can't abort the repo. KeyboardInterrupt is not an Exception and still stops mining.
     """
     since = now - LOG_RETENTION
     fixes = FixPairFinder(client, repo, since)
     done_runs = mined_run_ids(conn, repo)
     done_jobs = stored_job_ids(conn, repo)
     stored = 0
+    skipped_runs = 0
     for run in list_failed_runs(client, repo, since, max_runs):
         if run["id"] in done_runs:
             continue
-        for job in list_failed_jobs(client, repo, run["id"]):
-            if job["id"] in done_jobs:
-                continue
-            raw = download_job_log(client, repo, job["id"])
-            if raw is None:
-                if on_job:
-                    on_job(None, job["id"])
-                continue
-            relpath = log_relpath(repo, job["id"])
-            log_bytes, redactions = store_log(data_dir, relpath, raw)
-            failure = FailedJob(
-                job_id=job["id"],
-                repo=repo,
-                run_id=run["id"],
-                workflow_name=run.get("name") or "",
-                workflow_path=run.get("path") or "",
-                event=run["event"],
-                head_branch=run.get("head_branch"),
-                head_sha=run["head_sha"],
-                # Cached per (workflow, branch), so this costs at most one lookup per branch.
-                # Fork branches can't be paired with the base repo's runs; skip the lookup.
-                fix_sha=None if is_fork_run(run, repo) else fixes.fix_sha(run),
-                failed_steps=failed_step_names(job),
-                runner_os=runner_os_from_labels(job.get("labels") or []),
-                created_at=run["created_at"],
-                log_path=relpath.as_posix(),
-                log_bytes=log_bytes,
-                redactions=redactions,
-            )
-            insert_failure(conn, failure)
-            stored += 1
-            if on_job:
-                on_job(failure, failure.job_id)
+        try:
+            stored += _mine_run(client, conn, data_dir, repo, run, fixes, done_jobs, on_job)
+        except Exception as exc:
+            # Only the type: messages can be long, and the run is retried on the next pass.
+            logger.warning("run skipped: %s run %s: %s", repo, run["id"], type(exc).__name__)
+            skipped_runs += 1
+            continue
         mark_run_mined(conn, repo, run["id"], now)
+    return MineResult(stored=stored, skipped_runs=skipped_runs)
+
+
+def _mine_run(
+    client: GitHubClient,
+    conn: sqlite3.Connection,
+    data_dir: Path,
+    repo: str,
+    run: dict[str, Any],
+    fixes: FixPairFinder,
+    done_jobs: set[int],
+    on_job: Callable[[FailedJob | None, int], None] | None,
+) -> int:
+    """Store the failed jobs of one run. Returns jobs stored."""
+    stored = 0
+    for job in list_failed_jobs(client, repo, run["id"]):
+        if job["id"] in done_jobs:
+            continue
+        raw = download_job_log(client, repo, job["id"])
+        if raw is None:
+            if on_job:
+                on_job(None, job["id"])
+            continue
+        relpath = log_relpath(repo, job["id"])
+        log_bytes, redactions = store_log(data_dir, relpath, raw)
+        failure = FailedJob(
+            job_id=job["id"],
+            repo=repo,
+            run_id=run["id"],
+            workflow_name=run.get("name") or "",
+            workflow_path=run.get("path") or "",
+            event=run["event"],
+            head_branch=run.get("head_branch"),
+            head_sha=run["head_sha"],
+            # Cached per (workflow, branch), so this costs at most one lookup per branch.
+            # Fork branches can't be paired with the base repo's runs; skip the lookup.
+            fix_sha=None if is_fork_run(run, repo) else fixes.fix_sha(run),
+            failed_steps=failed_step_names(job),
+            runner_os=runner_os_from_labels(job.get("labels") or []),
+            created_at=run["created_at"],
+            log_path=relpath.as_posix(),
+            log_bytes=log_bytes,
+            redactions=redactions,
+        )
+        insert_failure(conn, failure)
+        stored += 1
+        if on_job:
+            on_job(failure, failure.job_id)
     return stored
 
 

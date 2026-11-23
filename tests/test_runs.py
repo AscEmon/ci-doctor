@@ -16,6 +16,7 @@ from cidoc.miner.discover import RepoInfo, save_repo
 from cidoc.miner.runs import (
     LOG_RETENTION,
     FailedJob,
+    MineResult,
     list_failed_runs,
     log_relpath,
     mine_repo,
@@ -177,7 +178,7 @@ def test_mine_repo_never_requests_jobs_for_skipped_workflows(
     )
 
     with client:
-        stored = mine_repo(client, conn, tmp_path, REPO, NOW, max_runs=30)
+        stored = mine_repo(client, conn, tmp_path, REPO, NOW, max_runs=30).stored
 
     assert stored == 0
     assert seen == [f"/repos/{REPO}/actions/runs"]
@@ -198,7 +199,7 @@ def test_fork_pr_run_gets_no_fix_sha_and_no_lookup(
     )
 
     with client:
-        stored = mine_repo(client, conn, tmp_path, REPO, NOW, max_runs=30)
+        stored = mine_repo(client, conn, tmp_path, REPO, NOW, max_runs=30).stored
 
     assert stored == 1
     assert conn.execute("SELECT fix_sha FROM failures").fetchone()["fix_sha"] is None
@@ -234,7 +235,7 @@ def test_mine_repo_stores_failed_jobs_with_redacted_gzipped_logs(
     with client:
         stored = mine_repo(
             client, conn, tmp_path, REPO, NOW, max_runs=30, on_job=lambda j, _: reported.append(j)
-        )
+        ).stored
 
     assert stored == 1
     row = conn.execute("SELECT * FROM failures").fetchone()
@@ -276,7 +277,7 @@ def test_mine_repo_skips_expired_logs(conn: sqlite3.Connection, tmp_path: Path) 
             NOW,
             max_runs=30,
             on_job=lambda j, job_id: skipped.append(job_id) if j is None else None,
-        )
+        ).stored
 
     assert stored == 1
     assert skipped == [1001]
@@ -293,11 +294,11 @@ def test_rerun_after_completion_does_no_work(conn: sqlite3.Connection, tmp_path:
     jobs = {100: [job(1001)], 200: [job(2001)]}
     logs: dict[int, bytes | int | BaseException] = {1001: b"a\n", 2001: 410}
     with make_client(runs, jobs, logs) as client:
-        assert mine_repo(client, conn, tmp_path, REPO, NOW, max_runs=30) == 1
+        assert mine_repo(client, conn, tmp_path, REPO, NOW, max_runs=30).stored == 1
 
     seen: list[str] = []
     with make_client(runs, jobs, logs, seen) as client:
-        assert mine_repo(client, conn, tmp_path, REPO, NOW, max_runs=30) == 0
+        assert mine_repo(client, conn, tmp_path, REPO, NOW, max_runs=30).stored == 0
 
     assert seen == [f"/repos/{REPO}/actions/runs"]
     assert stored_jobs(conn) == [1001]
@@ -317,12 +318,44 @@ def test_resume_after_interruption_mid_run(conn: sqlite3.Connection, tmp_path: P
     seen: list[str] = []
     logs: dict[int, bytes | int | BaseException] = {1001: b"a\n", 1002: b"b\n"}
     with make_client(runs, jobs, logs, seen) as client:
-        assert mine_repo(client, conn, tmp_path, REPO, NOW, max_runs=30) == 1
+        assert mine_repo(client, conn, tmp_path, REPO, NOW, max_runs=30).stored == 1
 
     assert f"/repos/{REPO}/actions/jobs/1001/logs" not in seen
     assert f"/repos/{REPO}/actions/jobs/1002/logs" in seen
     assert stored_jobs(conn) == [1001, 1002]
     assert [r[0] for r in conn.execute("SELECT run_id FROM mined_runs")] == [100]
+
+
+def test_error_in_one_run_skips_it_and_continues(
+    conn: sqlite3.Connection, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    runs = [run(100), run(200)]
+    jobs = {100: [job(1001)], 200: [job(2001)]}
+    logs: dict[int, bytes | int | BaseException] = {1001: RuntimeError("boom"), 2001: b"b\n"}
+
+    with make_client(runs, jobs, logs) as client:
+        result = mine_repo(client, conn, tmp_path, REPO, NOW, max_runs=30)
+
+    assert result == MineResult(stored=1, skipped_runs=1)
+    assert stored_jobs(conn) == [2001]
+    # The failed run stays unmarked so the next pass retries it.
+    assert [r[0] for r in conn.execute("SELECT run_id FROM mined_runs")] == [200]
+    [record] = caplog.records
+    assert record.levelname == "WARNING"
+    assert record.getMessage() == f"run skipped: {REPO} run 100: RuntimeError"
+
+
+def test_skipped_run_is_retried_on_next_pass(conn: sqlite3.Connection, tmp_path: Path) -> None:
+    runs = [run(100)]
+    jobs = {100: [job(1001)]}
+    with make_client(runs, jobs, {1001: RuntimeError("boom")}) as client:
+        assert mine_repo(client, conn, tmp_path, REPO, NOW, max_runs=30).skipped_runs == 1
+
+    with make_client(runs, jobs, {1001: b"a\n"}) as client:
+        result = mine_repo(client, conn, tmp_path, REPO, NOW, max_runs=30)
+
+    assert result == MineResult(stored=1, skipped_runs=0)
+    assert stored_jobs(conn) == [1001]
 
 
 def test_mined_runs_count_toward_per_repo_cap(conn: sqlite3.Connection, tmp_path: Path) -> None:
@@ -331,8 +364,8 @@ def test_mined_runs_count_toward_per_repo_cap(conn: sqlite3.Connection, tmp_path
     logs: dict[int, bytes | int | BaseException] = {1001: b"a", 2001: b"b", 3001: b"c"}
 
     with make_client(runs, jobs, logs) as client:
-        assert mine_repo(client, conn, tmp_path, REPO, NOW, max_runs=2) == 2
-        assert mine_repo(client, conn, tmp_path, REPO, NOW, max_runs=2) == 0
-        assert mine_repo(client, conn, tmp_path, REPO, NOW, max_runs=3) == 1
+        assert mine_repo(client, conn, tmp_path, REPO, NOW, max_runs=2).stored == 2
+        assert mine_repo(client, conn, tmp_path, REPO, NOW, max_runs=2).stored == 0
+        assert mine_repo(client, conn, tmp_path, REPO, NOW, max_runs=3).stored == 1
 
     assert stored_jobs(conn) == [1001, 2001, 3001]

@@ -111,8 +111,13 @@ def mine_runs(
         with open_github() as client:
             for name in targets:
                 console.print(f"[bold]{name}[/bold]")
-                stored = mine_repo(client, conn, data_dir, name, now, max_per_repo, report)
-                console.print(f"  stored {stored} new failed jobs")
+                result = mine_repo(client, conn, data_dir, name, now, max_per_repo, report)
+                console.print(f"  stored {result.stored} new failed jobs")
+                if result.skipped_runs:
+                    console.print(
+                        f"  [yellow]skipped {result.skipped_runs} runs after errors[/yellow]"
+                        " (rerun to retry them)"
+                    )
     except KeyboardInterrupt:
         console.print("[yellow]Interrupted.[/yellow] Progress is saved; rerun to resume.")
         raise typer.Exit(130) from None
