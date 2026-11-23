@@ -23,7 +23,7 @@
    | Variable            | Value                                                    |
    | ------------------- | -------------------------------------------------------- |
    | `GITHUB_TOKEN`      | GitHub token with read access to Actions on target repos |
-   | `ANTHROPIC_API_KEY` | Anthropic API key                                        |
+   | `ANTHROPIC_API_KEY` | Anthropic API key (only needed for analyze/eval)        |
 
    `.env` and `data/` are gitignored. Never commit them.
 
