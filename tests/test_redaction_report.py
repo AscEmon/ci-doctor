@@ -21,7 +21,7 @@ REPO = "o/app"
 # Fake secrets built at runtime so no scanner mistakes them for real ones.
 FAKE_GHP = "ghp" + "_" + "Ab1Cd2Ef3Gh4Ij5Kl6Mn7Op8Qr9St0UvWxYz"
 FAKE_AWS = "AKIA" + "ABCDEFGHIJKLMNOP"
-FAKE_LONG = "Zz9" * 15  # 45 chars, caught by keyword_secret
+FAKE_LONG = "Xq7" + "Lm2Rp9Tv4Wz8Kd3Hn6Bc1Gs5Jf0Ya"  # random-looking: keyword_secret
 FAKE_SECRETS = (FAKE_GHP, FAKE_AWS, FAKE_LONG)
 
 
