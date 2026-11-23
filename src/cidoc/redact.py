@@ -4,10 +4,11 @@ GitHub already masks registered secrets as '***', but tokens that leak via
 unregistered env vars, echoed config files, or tool debug output do not get
 that treatment, so this pass is a safety net.
 
-Vendor rules (known token formats) always mask. The generic keyword rule is
-narrower: masking cache keys and file names destroyed diagnostic context while
-catching no secrets, so it only masks values that look random (see
-_is_secret_value) and never in GitHub Actions cache-key lines.
+Vendor rules (known token formats) always mask. The generic rule,
+assignment_secret, only looks at assignments to a secret-sounding name
+(API_TOKEN=..., client_secret: ...) and only masks values that look random.
+Matching on a bare "key" word was tried and dropped: in CI logs it hits package
+names, cache keys and build flags far more often than secrets.
 """
 
 import math
@@ -17,15 +18,25 @@ from dataclasses import dataclass, field
 
 # Bump when a rule change alters what gets masked, so stored logs redacted under older
 # rules can be found and refetched. 1: original rules. 2: narrowed keyword_secret, jwt.
-REDACTOR_VERSION = 2
+# 3: keyword_secret replaced by assignment_secret.
+REDACTOR_VERSION = 3
 
-# keyword_secret thresholds. Random tokens of this length score ~4+ bits/char;
-# words, versions and slugs score lower.
-MIN_SECRET_LENGTH = 20
-MIN_SECRET_ENTROPY = 3.5
+# assignment_secret thresholds. Random tokens this long score ~4.5+ bits/char; slugs,
+# versions and hash-suffixed identifiers mostly score lower.
+MIN_SECRET_LENGTH = 24
+MIN_SECRET_ENTROPY = 4.0
+
+# A whole identifier (word boundaries on both sides) containing a secret-ish part.
+# Bare KEY, PUBLIC_KEY and PUBLISHABLE_KEY contain none of these and never match.
+_SENSITIVE_NAME = (
+    r"\b[A-Z0-9_]*(?:SECRET|TOKEN|PASSWORD|PASSWD|API_KEY|APIKEY|PRIVATE_KEY|ACCESS_KEY"
+    r"|CLIENT_SECRET)[A-Z0-9_]*\b"
+)
+# Characters that end a value: whitespace, quotes, brackets and list separators.
+_VALUE_CHARS = r"[^\s\"'`,;()\[\]{}<>]"
 
 # Order matters: whole private-key blocks first, then specific token formats,
-# and the generic keyword=value rule last so it never sees an already-masked token.
+# and the generic assignment rule last so it never sees an already-masked token.
 _PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     (
         "private_key",
@@ -44,24 +55,19 @@ _PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     # JSON Web Token: base64url header and payload, both JSON objects ('{"' -> 'eyJ').
     ("jwt", re.compile(r"\beyJ[A-Za-z0-9_-]{5,}\.eyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]*")),
     (
-        "keyword_secret",
+        "assignment_secret",
         re.compile(
-            r"(?i)((?:key|token|secret|password)[\w.-]*[\"']?\s*[:=]?\s*[\"']?)"
-            # No spaces, quotes or brackets: brackets keep [REDACTED:...] masks from
-            # earlier rules out. The value may not start with the separator, which the
-            # prefix makes optional. Length is checked here, not in the callback, so a
-            # short word after the keyword never swallows the real value that follows.
-            rf"(?![:=])([^\s\"'`,;()\[\]{{}}<>]{{{MIN_SECRET_LENGTH},}})"
+            # Group 1: NAME, optional closing quote, '=' or ':' (required), optional
+            # opening quote. Kept in the output so the line still reads sensibly.
+            rf"(?i)({_SENSITIVE_NAME}[\"']?[ \t]*[:=][ \t]*[\"']?)"
+            # Group 2: the value. It may not start with another separator, must be long
+            # enough here (not just in the callback, so a rejected short value can't hide
+            # a later one), and must end at a value boundary, never mid-token.
+            rf"(?![:=])({_VALUE_CHARS}{{{MIN_SECRET_LENGTH},}})(?!{_VALUE_CHARS})"
         ),
     ),
 )
 
-# GitHub Actions cache lines: the "key" there is a cache key (often a hash), not a secret.
-_CACHE_KEY_CONTEXT = re.compile(
-    r"cache restored from key|cache not found for input keys|restored from cache key"
-    r"|saved cache entry with key",
-    re.IGNORECASE,
-)
 FILE_EXTENSIONS = (
     ".jks",
     ".keystore",
@@ -78,7 +84,8 @@ FILE_EXTENSIONS = (
     ".yml",
     ".txt",
 )
-
+# GitHub's own mask for registered secrets.
+GITHUB_MASK = "***"
 
 RULE_NAMES: tuple[str, ...] = tuple(kind for kind, _ in _PATTERNS)
 # What a masked value looks like in a stored log; group 1 is the rule name.
@@ -97,24 +104,33 @@ def shannon_entropy(value: str) -> float:
     return sum(c / n * math.log2(n / c) for c in Counter(value).values())
 
 
-def _looks_like_path(value: str) -> bool:
-    return "/" in value or value.lower().endswith(FILE_EXTENSIONS)
+def looks_like_path(value: str) -> bool:
+    """A file path, URL or file name.
+
+    Deliberately not "contains '/'": base64 secrets often contain '/' mid-value, and
+    roughly half of 40-char ones would slip through. Relative directories without a
+    leading ./ or a file extension are rare as secret-named values and get masked.
+    """
+    return (
+        value.startswith(("/", "./", "../", "~/"))
+        or "://" in value
+        or value.lower().endswith(FILE_EXTENSIONS)
+    )
 
 
-def _is_secret_value(value: str) -> bool:
+def is_secret_value(value: str) -> bool:
     return (
         len(value) >= MIN_SECRET_LENGTH
         and " " not in value
-        and not _looks_like_path(value)
+        and GITHUB_MASK not in value
+        and not looks_like_path(value)
         and shannon_entropy(value) >= MIN_SECRET_ENTROPY
     )
 
 
-def _in_cache_key_line(match: re.Match[str]) -> bool:
-    """True if a cache phrase precedes the value on its line (the phrase ends in the key word)."""
-    text = match.string
-    line_start = text.rfind("\n", 0, match.start()) + 1
-    return bool(_CACHE_KEY_CONTEXT.search(text, line_start, match.start(2)))
+def _is_excluded_name(prefix: str) -> bool:
+    # Xcode build settings (INFOPLIST_KEY_*) hold Info.plist text, never secrets.
+    return "INFOPLIST" in prefix.upper()
 
 
 @dataclass(frozen=True)
@@ -131,17 +147,16 @@ def redact(text: str) -> Redaction:
     """Return `text` with secrets masked, plus how many of each kind were found."""
     counts: Counter[str] = Counter()
 
-    def mask_keyword_value(match: re.Match[str]) -> str:
+    def mask_assignment(match: re.Match[str]) -> str:
         prefix, value = match.group(1), match.group(2)
-        if _in_cache_key_line(match) or not _is_secret_value(value):
+        if _is_excluded_name(prefix) or not is_secret_value(value):
             return match.group(0)
-        counts["keyword_secret"] += 1
-        # Keep the key name so the log line still reads sensibly.
-        return prefix + _mask("keyword_secret")
+        counts["assignment_secret"] += 1
+        return prefix + _mask("assignment_secret")
 
     for kind, pattern in _PATTERNS:
-        if kind == "keyword_secret":
-            text = pattern.sub(mask_keyword_value, text)
+        if kind == "assignment_secret":
+            text = pattern.sub(mask_assignment, text)
             continue
         text, n = pattern.subn(_mask(kind), text)
         if n:

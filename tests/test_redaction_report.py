@@ -21,7 +21,7 @@ REPO = "o/app"
 # Fake secrets built at runtime so no scanner mistakes them for real ones.
 FAKE_GHP = "ghp" + "_" + "Ab1Cd2Ef3Gh4Ij5Kl6Mn7Op8Qr9St0UvWxYz"
 FAKE_AWS = "AKIA" + "ABCDEFGHIJKLMNOP"
-FAKE_LONG = "Xq7" + "Lm2Rp9Tv4Wz8Kd3Hn6Bc1Gs5Jf0Ya"  # random-looking: keyword_secret
+FAKE_LONG = "Xq7" + "Lm2Rp9Tv4Wz8Kd3Hn6Bc1Gs5Jf0Ya"  # random-looking: assignment_secret
 FAKE_SECRETS = (FAKE_GHP, FAKE_AWS, FAKE_LONG)
 
 
@@ -90,7 +90,7 @@ def test_counts_per_rule_and_logs(conn: sqlite3.Connection, tmp_path: Path) -> N
     assert [(r.rule, r.redactions, r.logs) for r in report.rules] == [
         ("github_token", 2, 2),
         ("aws_access_key", 1, 1),
-        ("keyword_secret", 1, 1),
+        ("assignment_secret", 1, 1),
     ]
     assert report.logs_with_redactions == 2
     assert report.logs_counted_from_markers == 0
@@ -145,7 +145,7 @@ def test_old_rows_are_counted_from_markers(conn: sqlite3.Connection, tmp_path: P
     assert [(r.rule, r.redactions) for r in report.rules] == [
         ("github_token", 2),
         ("aws_access_key", 1),
-        ("keyword_secret", 1),
+        ("assignment_secret", 1),
     ]
     assert report.logs_counted_from_markers == 2
 

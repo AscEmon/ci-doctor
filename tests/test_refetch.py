@@ -122,10 +122,11 @@ def test_refetch_rewrites_log_and_row(conn: sqlite3.Connection, tmp_path: Path) 
     assert CACHE_KEY in text  # no longer over-masked
     assert FAKE_SECRET not in text  # still masked under the new rules
     assert text == (
-        f"Cache restored from key: {CACHE_KEY}\nsigning with SECRET_KEY=[REDACTED:keyword_secret]\n"
+        f"Cache restored from key: {CACHE_KEY}\n"
+        "signing with SECRET_KEY=[REDACTED:assignment_secret]\n"
     )
     r = row(conn, 1)
-    assert json.loads(r["redaction_counts"]) == {"keyword_secret": 1}
+    assert json.loads(r["redaction_counts"]) == {"assignment_secret": 1}
     assert r["redactions"] == 1
     assert r["log_bytes"] == len(text.encode())
     assert (r["redactor_version"], r["over_redacted"]) == (REDACTOR_VERSION, 0)
@@ -136,7 +137,7 @@ def test_refetched_log_is_not_a_target_again(conn: sqlite3.Connection, tmp_path:
     with make_client({1: RAW_LOG.encode(), 2: RAW_LOG.encode()}, []) as client:
         refetch_logs(client, conn, tmp_path, targets)
 
-    # Both still hold a (genuine) keyword_secret mask, but are on the current version.
+    # Both still hold a (genuine) mask, but are on the current version.
     assert find_refetch_targets(conn, tmp_path) == []
 
 

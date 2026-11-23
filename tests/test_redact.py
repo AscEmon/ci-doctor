@@ -1,6 +1,12 @@
 import pytest
 
-from cidoc.redact import MIN_SECRET_ENTROPY, redact, shannon_entropy
+from cidoc.redact import (
+    MIN_SECRET_ENTROPY,
+    MIN_SECRET_LENGTH,
+    looks_like_path,
+    redact,
+    shannon_entropy,
+)
 
 # Fake credentials are assembled at runtime so no secret-shaped literal lives in the repo.
 ALNUM = "Ab1Cd2Ef3Gh4Ij5Kl6Mn7Op8Qr9St0UvWxYz"
@@ -10,9 +16,6 @@ FAKE_PAT = "github" + "_pat_" + ALNUM + "_" + ALNUM
 FAKE_SK = "sk" + "-ant-" + ALNUM
 FAKE_AKIA = "AKIA" + "ABCDEFGH23456789"
 FAKE_B64 = ("QmFzZTY0U2VjcmV0VmFsdWU" * 3)[:56]
-TS = "2026-10-01T12:00:00.1234567Z "
-FAKE_HIGH_ENTROPY = ALNUM[:32]
-FAKE_SUPABASE = "sb_publishable_" + ALNUM[:24]
 FAKE_JWT = (
     "eyJ"
     + "hbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9"
@@ -21,12 +24,12 @@ FAKE_JWT = (
     + "."
     + "SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c"
 )
-# Cache keys as GitHub Actions prints them: long, hash-suffixed, and high-entropy, so
-# only the cache-line context (not length or entropy) keeps them readable.
-CACHE_KEY = "flutter-linux-stable-3.24.3-x64-8f14e45fceea167a5a36dedd4bea2543"
-GRADLE_KEY = "Linux-gradle-5f3c2a1b9e8d7c6b5a4f3e2d1c0b9a8f"
-PUB_KEY = "pub-cache-macos-arm64-c9f8e7d6b5a4c3b2a1f0e9d8c7b6a5f4"
-PODS_KEY = "macOS-pods-0a1b2c3d4e5f60718293a4b5c6d7e8f9"
+# Random-looking values of the lengths the must-redact cases call for.
+RANDOM_32 = "Xq7" + "Lm2Rp9Tv4Wz8Kd3Hn6Bc1Gs5Jf0Ya"
+RANDOM_40 = "Pn4" + "Vs8Ld1Gk6Ry3Zw9Bt2Mh7Qc5Fx0Je4Ua8Ko3Wi6"
+# Base64-shaped, with '/' and '+' mid-value like AWS secret access keys.
+RANDOM_B64_SLASH = "wJal" + "rXUtnFEMI/K7MDENG/bPxRfiCYzEXAMPLEKEY+9q"
+TS = "2026-10-01T12:00:00.1234567Z "
 
 
 @pytest.mark.parametrize(
@@ -47,23 +50,6 @@ def test_token_formats_masked(secret: str, kind: str) -> None:
     assert f"[REDACTED:{kind}]" in result.text
     assert result.counts == {kind: 1}
     assert result.total == 1
-
-
-@pytest.mark.parametrize(
-    "line",
-    [
-        f"API_KEY={FAKE_B64}",
-        f'"client_secret": "{FAKE_B64}"',
-        f"GOOGLE_SERVICES_TOKEN: {FAKE_B64}",
-        f"keystore password {FAKE_B64}",
-    ],
-)
-def test_long_value_after_keyword_masked_but_key_kept(line: str) -> None:
-    result = redact(line)
-
-    assert FAKE_B64 not in result.text
-    assert result.text.endswith("[REDACTED:keyword_secret]" + ('"' if line.endswith('"') else ""))
-    assert result.counts == {"keyword_secret": 1}
 
 
 def test_private_key_block_masked_across_timestamped_lines() -> None:
@@ -93,17 +79,129 @@ def test_truncated_private_key_masks_body_lines() -> None:
 
 
 def test_counts_multiple_hits() -> None:
-    result = redact(f"{FAKE_GHP} {FAKE_GHP}\nTOKEN={FAKE_B64}\n")
+    result = redact(f"{FAKE_GHP} {FAKE_GHP}\nAPI_TOKEN={RANDOM_32}\n")
 
-    assert result.counts == {"github_token": 2, "keyword_secret": 1}
+    assert result.counts == {"github_token": 2, "assignment_secret": 1}
     assert result.total == 3
 
 
-def test_token_inside_keyword_assignment_counted_once() -> None:
-    result = redact(f"GITHUB_TOKEN={FAKE_GHP}")
+@pytest.mark.parametrize(
+    ("line", "masked"),
+    [
+        (f"GITHUB_TOKEN={FAKE_GHP}", "GITHUB_TOKEN=[REDACTED:github_token]"),
+        (f"SUPABASE_ANON_TOKEN={FAKE_JWT}", "SUPABASE_ANON_TOKEN=[REDACTED:jwt]"),
+    ],
+)
+def test_vendor_token_in_assignment_counted_once(line: str, masked: str) -> None:
+    result = redact(line)
 
-    assert result.text == "GITHUB_TOKEN=[REDACTED:github_token]"
+    assert result.text == masked
     assert result.total == 1
+
+
+# --- assignment_secret: must redact ----------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("line", "masked"),
+    [
+        (f"API_TOKEN={RANDOM_32}", "API_TOKEN=[REDACTED:assignment_secret]"),
+        (f"client_secret: {RANDOM_40}", "client_secret: [REDACTED:assignment_secret]"),
+        (f'"client_secret": "{RANDOM_40}"', '"client_secret": "[REDACTED:assignment_secret]"'),
+        (
+            f"{TS}export DB_PASSWORD='{RANDOM_32}'",
+            f"{TS}export DB_PASSWORD='[REDACTED:assignment_secret]'",
+        ),
+        (f"apiKey: {RANDOM_32}", "apiKey: [REDACTED:assignment_secret]"),
+        (f"FIREBASE_PRIVATE_KEY={RANDOM_40}", "FIREBASE_PRIVATE_KEY=[REDACTED:assignment_secret]"),
+        (
+            f"aws_secret_access_key = {RANDOM_B64_SLASH}",
+            "aws_secret_access_key = [REDACTED:assignment_secret]",
+        ),
+        (
+            f"--client-secret={RANDOM_32} --verbose",
+            "--client-secret=[REDACTED:assignment_secret] --verbose",
+        ),
+        (f"MATCH_PASSWD:{RANDOM_32}", "MATCH_PASSWD:[REDACTED:assignment_secret]"),
+    ],
+)
+def test_assignment_secret_masked(line: str, masked: str) -> None:
+    result = redact(line)
+
+    assert result.text == masked
+    assert result.counts == {"assignment_secret": 1}
+
+
+def test_base64_with_slashes_is_not_treated_as_a_path() -> None:
+    assert "/" in RANDOM_B64_SLASH
+    assert not looks_like_path(RANDOM_B64_SLASH)
+
+
+# --- assignment_secret: must NOT redact (audit regressions) ---------------------
+
+AUDIT_FALSE_POSITIVES = [
+    # Secret-ish words inside longer identifiers or paths (old rule matched mid-word).
+    f"{TS}Downloading flutter_keyboard_visibility_platform_interface-2.0.0.tar.gz",
+    f"{TS}+ flutter_keyboard_visibility 6.0.0 (was 5.4.1)",
+    f"{TS}gnome-keyring-daemon: GNOME_KEYRING_CONTROL=/run/user/1001/keyring",
+    f"{TS}00:03 +12: test/nskey_self_signed_certificate_validation_test.dart: loads",
+    # Cache inputs (hash-suffixed, high entropy).
+    f"{TS}  key: Linux-pub-8f14e45fceea167a5a36dedd4bea2543a1b2c3d4",
+    f"{TS}Cache not found for keys: Linux-gradle-5f3c2a1b9e8d7c6b5a4f3e2d1c0b9a8f7e6d",
+    f"{TS}Cache restored from key: flutter-linux-stable-3.24.3-x64-8f14e45fceea167a5a",
+    # Build settings and flags that are not secrets.
+    f"{TS}export INFOPLIST_KEY_NSCameraUsageDescription=Scan_QR_codes_to_pay_merchants",
+    f"{TS}export INFOPLIST_KEY_API_TOKEN_USAGE={RANDOM_32}",
+    f"{TS}flutter build ipa -dShorebirdPublicKey={RANDOM_40}",
+    # Public / publishable / bare keys are not secrets by design.
+    f"SUPABASE_PUBLISHABLE_KEY: sb_publishable_{RANDOM_32}",
+    f"PUBLIC_KEY={RANDOM_40}",
+    f"KEY={RANDOM_40}",
+    f"SymmetricKey: {RANDOM_32}",
+]
+
+
+@pytest.mark.parametrize("line", AUDIT_FALSE_POSITIVES)
+def test_audit_false_positives_untouched(line: str) -> None:
+    result = redact(line)
+
+    assert result.text == line
+    assert result.total == 0
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "API_TOKEN=***",
+        "client_secret: ***",
+        f"API_TOKEN={RANDOM_32[: MIN_SECRET_LENGTH - 1]}",  # one char too short
+        "API_TOKEN=" + "ab" * 20,  # long, low entropy
+        "API_TOKEN=release-candidate-build-number",  # slug: below 4.0 bits/char
+        "API_TOKEN_FILE=/home/runner/work/app/secrets/api_token.txt",
+        "CLIENT_SECRET_PATH=./android/app/client_secret_1234567890.json",
+        "PASSWORD_URL=https://vault.example.com/v1/secret/data/payments-app",
+        "GOOGLE_SERVICES_TOKEN_JSON=firebase-adminsdk-prod-x7k2m9q4.json",
+        "GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}",
+        f"API_TOKEN {RANDOM_32}",  # no '=' or ':': not an assignment
+    ],
+)
+def test_non_secret_assignments_untouched(line: str) -> None:
+    result = redact(line)
+
+    assert result.text == line
+    assert result.total == 0
+
+
+def test_value_is_masked_whole_never_mid_token() -> None:
+    result = redact(f"API_TOKEN={RANDOM_32}.extra-suffix next")
+
+    assert result.text == "API_TOKEN=[REDACTED:assignment_secret] next"
+
+
+def test_rejected_short_value_does_not_hide_a_later_assignment() -> None:
+    result = redact(f"API_TOKEN=short CLIENT_SECRET={RANDOM_40}")
+
+    assert result.text == "API_TOKEN=short CLIENT_SECRET=[REDACTED:assignment_secret]"
 
 
 @pytest.mark.parametrize(
@@ -113,7 +211,6 @@ def test_token_inside_keyword_assignment_counted_once() -> None:
         "FAILURE: Build failed with an exception.",
         "Run flutter test --coverage",
         "task-runner-utils resolved",
-        "Cache restored from key: flutter-linux-stable-3.24.3-x64",
         "HEAD is now at 1f2e3d4c5b6a79881f2e3d4c5b6a79881f2e3d4c",
         "token: ***",
         "Error: Could not resolve com.android.tools.build:gradle:8.5.0.",
@@ -126,112 +223,11 @@ def test_ordinary_log_lines_untouched(line: str) -> None:
     assert result.total == 0
 
 
-@pytest.mark.parametrize(
-    "line",
-    [
-        f"{TS}Cache restored from key: {CACHE_KEY}",
-        f"{TS}Cache not found for input keys: {GRADLE_KEY}, Linux-gradle-",
-        f'{TS}Restored from cache key "{PUB_KEY}"',
-        f"{TS}Saved cache entry with key {PODS_KEY}",
-        f"{TS}CACHE RESTORED FROM KEY: {CACHE_KEY}",
-    ],
-)
-def test_cache_key_lines_untouched(line: str) -> None:
-    result = redact(line)
-
-    assert result.text == line
-    assert result.total == 0
-
-
-@pytest.mark.parametrize("value", [CACHE_KEY, GRADLE_KEY, PUB_KEY, PODS_KEY])
-def test_same_values_outside_cache_lines_are_masked(value: str) -> None:
-    # Proves the cache context is what spares them: they pass length and entropy.
-    assert shannon_entropy(value) >= MIN_SECRET_ENTROPY
-
-    result = redact(f"API_KEY={value}")
-
-    assert result.text == "API_KEY=[REDACTED:keyword_secret]"
-
-
-def test_cache_context_does_not_leak_to_next_line() -> None:
-    log = f"Cache restored from key: {CACHE_KEY}\nSECRET_KEY={FAKE_HIGH_ENTROPY}\n"
-
-    result = redact(log)
-
-    assert CACHE_KEY in result.text
-    assert FAKE_HIGH_ENTROPY not in result.text
-    assert result.counts == {"keyword_secret": 1}
-
-
-def test_vendor_tokens_still_masked_in_cache_lines() -> None:
-    result = redact(f"Cache restored from key: deps-{FAKE_GHP}")
-
-    assert FAKE_GHP not in result.text
-    assert result.counts == {"github_token": 1}
-
-
-@pytest.mark.parametrize(
-    "line",
-    [
-        "storeFile=release.jks",
-        "keystore: release.jks",
-        "KEYSTORE_FILE=upload-keystore-release-2026.jks",
-        "key_file: firebase-adminsdk-prod-x7k2m9.json",
-        "keyProperties=android/key.properties",
-        "SIGNING_KEY_PATH=/home/runner/work/app/app/android/app/upload.keystore",
-        "secretFile=ios/Runner/GoogleService-Info.plist",
-        "token_url=https://oauth2.googleapis.com/token/abcdefghij",
-        "keyAlias=distribution-cert-2026.p12",
-    ],
-)
-def test_file_names_and_paths_untouched(line: str) -> None:
-    result = redact(line)
-
-    assert result.text == line
-    assert result.total == 0
-
-
-@pytest.mark.parametrize(
-    "line",
-    [
-        "SECRET_NAME=" + "a" * 30,  # long but no entropy
-        "token: abcabcabcabcabcabcabcabc",
-        "API_KEY=Ab1Cd2Ef3Gh4Ij5Kl6M",  # 19 chars: below the length floor
-    ],
-)
-def test_low_entropy_or_short_values_untouched(line: str) -> None:
-    assert redact(line).total == 0
-
-
-@pytest.mark.parametrize(
-    ("line", "kept_prefix"),
-    [
-        (f"{TS}SymmetricKey: {FAKE_HIGH_ENTROPY}", f"{TS}SymmetricKey: "),
-        (f"SUPABASE_PUBLISHABLE_KEY: {FAKE_SUPABASE}", "SUPABASE_PUBLISHABLE_KEY: "),
-        (f'"api_key": "{FAKE_HIGH_ENTROPY}"', '"api_key": "'),
-        (f"DB_PASSWORD={FAKE_HIGH_ENTROPY}", "DB_PASSWORD="),
-    ],
-)
-def test_high_entropy_keyword_values_masked(line: str, kept_prefix: str) -> None:
-    result = redact(line)
-
-    assert FAKE_HIGH_ENTROPY not in result.text
-    assert FAKE_SUPABASE not in result.text
-    assert result.text.startswith(kept_prefix + "[REDACTED:keyword_secret]")
-    assert result.counts == {"keyword_secret": 1}
-
-
-def test_short_word_after_keyword_does_not_hide_the_value() -> None:
-    result = redact(f"keystore password {FAKE_HIGH_ENTROPY}")
-
-    assert result.text == "keystore password [REDACTED:keyword_secret]"
-
-
-def test_jwt_after_keyword_counted_once_as_jwt() -> None:
-    result = redact(f"SUPABASE_ANON_KEY={FAKE_JWT}")
-
-    assert result.text == "SUPABASE_ANON_KEY=[REDACTED:jwt]"
-    assert result.counts == {"jwt": 1}
+def test_thresholds() -> None:
+    assert MIN_SECRET_LENGTH == 24
+    assert MIN_SECRET_ENTROPY == 4.0
+    for value in (RANDOM_32, RANDOM_40, RANDOM_B64_SLASH):
+        assert shannon_entropy(value) >= MIN_SECRET_ENTROPY
 
 
 def test_shannon_entropy() -> None:
