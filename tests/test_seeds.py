@@ -10,6 +10,7 @@ from pydantic import SecretStr
 from cidoc.db import connect
 from cidoc.github_client import GitHubClient
 from cidoc.miner.discover import RepoInfo, save_repo
+from cidoc.miner.rules import RepoExcludes
 from cidoc.miner.seeds import add_seed_repos, parse_seed_file
 
 # Fake value for tests only; never put real credentials here.
@@ -62,3 +63,35 @@ def test_add_seed_repos(conn: sqlite3.Connection, tmp_path: Path) -> None:
     assert missing == ["o/gone"]
     rows = {tuple(r) for r in conn.execute("SELECT full_name, stars, default_branch FROM repos")}
     assert rows == {("o/known", 10, "main"), ("o/new", 42, "dev"), ("o/new-name", 42, "dev")}
+
+
+def test_add_seed_repos_honors_excludes(conn: sqlite3.Connection, tmp_path: Path) -> None:
+    seed_file = tmp_path / "seed_repos.txt"
+    seed_file.write_text("flutter/gallery\nacme/listed\no/app\no/moved\n", encoding="utf-8")
+    requested: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        name = request.url.path.removeprefix("/repos/")
+        requested.append(name)
+        # o/moved was transferred into an excluded org; the canonical name must be checked.
+        canonical = "dart-lang/moved" if name == "o/moved" else name
+        return httpx.Response(
+            200, json={"full_name": canonical, "stargazers_count": 42, "default_branch": "main"}
+        )
+
+    excluded: list[str] = []
+    excludes = RepoExcludes(repos=frozenset({"acme/listed"}))
+    with GitHubClient(FAKE_TOKEN, transport=httpx.MockTransport(handler)) as client:
+        added = add_seed_repos(
+            client,
+            conn,
+            seed_file,
+            NOW,
+            excludes=excludes,
+            on_excluded=lambda name, _reason: excluded.append(name),
+        )
+
+    assert added == 1
+    assert requested == ["o/app", "o/moved"]
+    assert excluded == ["flutter/gallery", "acme/listed", "dart-lang/moved"]
+    assert [r[0] for r in conn.execute("SELECT full_name FROM repos")] == ["o/app"]

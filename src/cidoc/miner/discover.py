@@ -9,6 +9,7 @@ from urllib.parse import quote
 import httpx
 
 from cidoc.github_client import GitHubClient
+from cidoc.miner.rules import RepoExcludes
 
 MIN_STARS = 200
 PUSHED_WITHIN = timedelta(days=182)  # ~6 months
@@ -114,15 +115,24 @@ def discover(
     now: datetime,
     limit: int,
     on_checked: Callable[[RepoInfo, bool], None] | None = None,
+    excludes: RepoExcludes | None = None,
+    on_excluded: Callable[[str, str], None] | None = None,
 ) -> int:
     """Search, keep repos with a Flutter workflow, and store them. Returns how many were added.
 
     Repos already in the table are skipped, so an interrupted run can be restarted cheaply.
+    Excluded repos are skipped before any API call; `on_excluded` gets (name, reason).
     """
+    excludes = excludes or RepoExcludes()
     already = known_repos(conn)
     added = 0
     for repo in search_repos(client, build_search_query(now), limit):
         if repo.full_name in already:
+            continue
+        reason = excludes.reason(repo.full_name)
+        if reason:
+            if on_excluded:
+                on_excluded(repo.full_name, reason)
             continue
         keep = uses_flutter_workflow(client, repo.full_name)
         if keep:

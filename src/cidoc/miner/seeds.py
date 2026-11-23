@@ -2,6 +2,7 @@
 
 The seed file has one `owner/repo` per line. Blank lines and `#` comments are ignored.
 Seed repos skip the Flutter-workflow check: listing one is an explicit choice.
+The exclude list still wins, so a seed can't pull an excluded framework repo back in.
 """
 
 import re
@@ -14,6 +15,7 @@ import httpx
 
 from cidoc.github_client import GitHubClient
 from cidoc.miner.discover import SKIPPABLE_STATUSES, RepoInfo, known_repos, save_repo
+from cidoc.miner.rules import RepoExcludes
 
 SEED_FILENAME = "seed_repos.txt"
 FULL_NAME_RE = re.compile(r"^[A-Za-z0-9-]+/[A-Za-z0-9._-]+$")
@@ -51,17 +53,31 @@ def add_seed_repos(
     seed_file: Path,
     now: datetime,
     on_missing: Callable[[str], None] | None = None,
+    excludes: RepoExcludes | None = None,
+    on_excluded: Callable[[str, str], None] | None = None,
 ) -> int:
     """Store every seed repo not already in the table. Returns how many were added."""
+    excludes = excludes or RepoExcludes()
     already = known_repos(conn)
     added = 0
     for name in parse_seed_file(seed_file.read_text(encoding="utf-8")):
         if name in already:
             continue
+        reason = excludes.reason(name)
+        if reason:
+            if on_excluded:
+                on_excluded(name, reason)
+            continue
         repo = fetch_repo(client, name)
         if repo is None:
             if on_missing:
                 on_missing(name)
+            continue
+        # Check the canonical name too: a renamed repo may now live in an excluded org.
+        reason = excludes.reason(repo.full_name)
+        if reason:
+            if on_excluded:
+                on_excluded(repo.full_name, reason)
             continue
         if repo.full_name not in already:
             save_repo(conn, repo, now)

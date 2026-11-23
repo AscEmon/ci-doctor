@@ -47,3 +47,48 @@ def test_mine_runs_prints_skipped_run_count(
     assert "skipped" not in ok
     assert "stored 1 new failed jobs" in bad
     assert "skipped 3 runs after errors" in bad
+
+
+def test_mine_runs_skips_excluded_repos(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    (data_dir / "exclude_repos.txt").write_text("acme/listed\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("GITHUB_TOKEN", "test-github-token-value")  # fake, tests only
+    monkeypatch.setenv("DATA_DIR", str(data_dir))
+    get_settings.cache_clear()
+    mined: list[str] = []
+
+    def fake_mine_repo(_c: object, _db: object, _d: object, name: str, *_a: object) -> MineResult:
+        mined.append(name)
+        return MineResult(stored=0, skipped_runs=0)
+
+    monkeypatch.setattr(cli, "open_github", lambda: nullcontext())
+    monkeypatch.setattr(cli, "mine_repo", fake_mine_repo)
+
+    args = ["mine", "runs", "--repo", "flutter/flutter", "--repo", "acme/listed", "--repo", "o/app"]
+    result = runner.invoke(app, args, terminal_width=200)
+    get_settings.cache_clear()
+
+    assert result.exit_code == 0, result.output
+    assert mined == ["o/app"]
+    assert "excluded flutter/flutter (excluded org flutter/*)" in result.output
+    assert "excluded acme/listed (listed in exclude_repos.txt)" in result.output
+
+
+def test_malformed_exclude_file_exits_with_message(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    (data_dir / "exclude_repos.txt").write_text("not a repo\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("GITHUB_TOKEN", "test-github-token-value")  # fake, tests only
+    monkeypatch.setenv("DATA_DIR", str(data_dir))
+    get_settings.cache_clear()
+
+    result = runner.invoke(app, ["mine", "runs"], terminal_width=200)
+    get_settings.cache_clear()
+
+    assert result.exit_code == 2
+    assert "exclude_repos.txt line 1" in result.output

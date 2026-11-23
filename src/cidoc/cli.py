@@ -17,6 +17,7 @@ from cidoc.github_client import GitHubClient
 from cidoc.labeling.labels import LABELS_FILENAME, load_labels
 from cidoc.labeling.session import load_candidates, pick_stratified, run_session
 from cidoc.miner.discover import RepoInfo, discover
+from cidoc.miner.rules import RepoExcludes, load_repo_excludes
 from cidoc.miner.runs import FailedJob, mine_repo, repos_to_mine
 from cidoc.miner.seeds import SEED_FILENAME, add_seed_repos
 from cidoc.miner.stats import collect_stats, pct
@@ -36,6 +37,18 @@ def open_db() -> sqlite3.Connection:
 def open_github() -> GitHubClient:
     settings = get_settings()
     return GitHubClient(settings.github_token, base_url=settings.github_api_url)
+
+
+def load_excludes() -> RepoExcludes:
+    try:
+        return load_repo_excludes(get_settings().data_dir)
+    except ValueError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(2) from None
+
+
+def report_excluded(name: str, reason: str) -> None:
+    console.print(f"[dim]excluded[/dim] {name} ({reason})")
 
 
 @app.callback()
@@ -71,15 +84,32 @@ def mine_discover(
     if seed_file and not seed_file.exists():
         raise typer.BadParameter(f"{seed_file} does not exist", param_hint="--seed-file")
 
+    excludes = load_excludes()
     now = datetime.now(UTC)
     conn = open_db()
     try:
         with open_github() as client:
             if seed_path.exists():
-                seeded = add_seed_repos(client, conn, seed_path, now, on_missing=report_missing)
+                seeded = add_seed_repos(
+                    client,
+                    conn,
+                    seed_path,
+                    now,
+                    on_missing=report_missing,
+                    excludes=excludes,
+                    on_excluded=report_excluded,
+                )
                 console.print(f"Added {seeded} seed repos from {seed_path}.")
             if search:
-                added = discover(client, conn, now, limit, on_checked=report)
+                added = discover(
+                    client,
+                    conn,
+                    now,
+                    limit,
+                    on_checked=report,
+                    excludes=excludes,
+                    on_excluded=report_excluded,
+                )
                 console.print(f"Added {added} repos from search.")
     finally:
         conn.close()
@@ -96,6 +126,7 @@ def mine_runs(
 ) -> None:
     """Download logs for failed jobs of every stored repo into the failures table."""
     data_dir = get_settings().data_dir
+    excludes = load_excludes()
     now = datetime.now(UTC)
 
     def report(job: FailedJob | None, job_id: int) -> None:
@@ -110,6 +141,10 @@ def mine_runs(
         targets = repo or repos_to_mine(conn)
         with open_github() as client:
             for name in targets:
+                reason = excludes.reason(name)
+                if reason:
+                    report_excluded(name, reason)
+                    continue
                 console.print(f"[bold]{name}[/bold]")
                 result = mine_repo(client, conn, data_dir, name, now, max_per_repo, report)
                 console.print(f"  stored {result.stored} new failed jobs")

@@ -18,6 +18,7 @@ from cidoc.miner.discover import (
     search_repos,
     uses_flutter_workflow,
 )
+from cidoc.miner.rules import RepoExcludes
 
 # Fake value for tests only; never put real credentials here.
 FAKE_TOKEN = SecretStr("test-github-token-value")
@@ -142,3 +143,53 @@ def test_discover_stores_flutter_repos_and_skips_known(conn: sqlite3.Connection)
     names = {row[0] for row in conn.execute("SELECT full_name FROM repos")}
     assert names == {"o/known", "o/flutter"}
     assert "o/known" not in workflow_calls
+
+
+def test_discover_skips_excluded_repos_without_api_calls(conn: sqlite3.Connection) -> None:
+    calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path == "/search/repositories":
+            items = [
+                search_item("flutter/flutter"),
+                search_item("dart-lang/sdk"),
+                search_item("acme/listed"),
+                search_item("o/app"),
+            ]
+            return httpx.Response(200, json={"items": items})
+        calls.append("/".join(path.split("/")[2:4]))
+        if path.endswith("/actions/workflows"):
+            return httpx.Response(200, json={"workflows": [{"path": ".github/workflows/ci.yml"}]})
+        return httpx.Response(200, text="run: flutter test")
+
+    excluded: list[tuple[str, str]] = []
+    excludes = RepoExcludes(repos=frozenset({"acme/listed"}))
+    with make_client(handler) as client:
+        added = discover(
+            client,
+            conn,
+            NOW,
+            limit=10,
+            excludes=excludes,
+            on_excluded=lambda name, reason: excluded.append((name, reason)),
+        )
+
+    assert added == 1
+    assert {row[0] for row in conn.execute("SELECT full_name FROM repos")} == {"o/app"}
+    assert set(calls) == {"o/app"}
+    assert excluded == [
+        ("flutter/flutter", "excluded org flutter/*"),
+        ("dart-lang/sdk", "excluded org dart-lang/*"),
+        ("acme/listed", "listed in exclude_repos.txt"),
+    ]
+
+
+def test_discover_applies_default_excludes_when_none_given(conn: sqlite3.Connection) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/search/repositories":
+            return httpx.Response(200, json={"items": [search_item("flutter/samples")]})
+        raise AssertionError(f"unexpected request {request.url.path}")
+
+    with make_client(handler) as client:
+        assert discover(client, conn, NOW, limit=10) == 0
