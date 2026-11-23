@@ -14,6 +14,7 @@ from cidoc.db import connect
 from cidoc.github_client import GitHubClient
 from cidoc.miner.discover import RepoInfo, save_repo
 from cidoc.miner.runs import (
+    LOG_RETENTION,
     FailedJob,
     list_failed_runs,
     log_relpath,
@@ -33,6 +34,7 @@ def run(run_id: int, created_at: str = "2026-10-20T10:00:00Z", **extra: Any) -> 
         "id": run_id,
         "name": "CI",
         "path": ".github/workflows/ci.yml",
+        "head_repository": {"full_name": REPO},
         "workflow_id": 7,
         "event": "pull_request",
         "head_branch": "feature/x",
@@ -139,6 +141,83 @@ def test_list_failed_runs_respects_limit() -> None:
 
     assert len(got) == 120
     assert pages == ["1", "2"]
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        {"path": "dynamic/pages/pages-build-deployment", "name": "pages build and deployment"},
+        {"path": "dynamic/dependabot/dependabot-updates", "name": "Dependabot Updates"},
+        {"path": ".github/workflows/codeql.yml", "name": "CodeQL"},
+        {"path": "dynamic/copilot-swe-agent/copilot", "name": "Copilot coding agent"},
+    ],
+)
+def test_list_failed_runs_skips_github_managed_workflows(extra: dict[str, str]) -> None:
+    runs = [run(1, **extra), run(2), run(3, **extra), run(4)]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"workflow_runs": runs})
+
+    with GitHubClient(FAKE_TOKEN, transport=httpx.MockTransport(handler)) as client:
+        got = [r["id"] for r in list_failed_runs(client, REPO, NOW - LOG_RETENTION, limit=2)]
+
+    # Skipped runs don't use up the cap.
+    assert got == [2, 4]
+
+
+def test_mine_repo_never_requests_jobs_for_skipped_workflows(
+    conn: sqlite3.Connection, tmp_path: Path
+) -> None:
+    seen: list[str] = []
+    client = make_client(
+        runs=[run(100, path="dynamic/pages/pages-build-deployment")],
+        jobs={},
+        logs={},
+        seen=seen,
+    )
+
+    with client:
+        stored = mine_repo(client, conn, tmp_path, REPO, NOW, max_runs=30)
+
+    assert stored == 0
+    assert seen == [f"/repos/{REPO}/actions/runs"]
+
+
+@pytest.mark.parametrize(
+    "head_repository", [{"full_name": "someone/app-fork"}, None], ids=["fork", "deleted-fork"]
+)
+def test_fork_pr_run_gets_no_fix_sha_and_no_lookup(
+    conn: sqlite3.Connection, tmp_path: Path, head_repository: dict[str, str] | None
+) -> None:
+    seen: list[str] = []
+    client = make_client(
+        runs=[run(100, head_repository=head_repository)],
+        jobs={100: [job(1001)]},
+        logs={1001: b"error: boom\n"},
+        seen=seen,
+    )
+
+    with client:
+        stored = mine_repo(client, conn, tmp_path, REPO, NOW, max_runs=30)
+
+    assert stored == 1
+    assert conn.execute("SELECT fix_sha FROM failures").fetchone()["fix_sha"] is None
+    assert not any("/actions/workflows/" in path for path in seen)
+
+
+def test_same_repo_run_still_looks_up_fix_sha(conn: sqlite3.Connection, tmp_path: Path) -> None:
+    seen: list[str] = []
+    client = make_client(
+        runs=[run(100, head_repository={"full_name": "ACME/App"})],  # names are case-insensitive
+        jobs={100: [job(1001)]},
+        logs={1001: b"error: boom\n"},
+        seen=seen,
+    )
+
+    with client:
+        mine_repo(client, conn, tmp_path, REPO, NOW, max_runs=30)
+
+    assert f"/repos/{REPO}/actions/workflows/7/runs" in seen
 
 
 def test_mine_repo_stores_failed_jobs_with_redacted_gzipped_logs(

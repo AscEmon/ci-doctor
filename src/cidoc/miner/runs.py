@@ -14,6 +14,7 @@ import httpx
 
 from cidoc.github_client import GitHubClient
 from cidoc.miner.fixpair import FixPairFinder
+from cidoc.miner.rules import is_fork_run, run_skip_reason
 from cidoc.redact import redact
 
 # GitHub deletes run logs after 90 days by default.
@@ -71,7 +72,11 @@ def failed_step_names(job: dict[str, Any]) -> list[str]:
 def list_failed_runs(
     client: GitHubClient, repo: str, since: datetime, limit: int
 ) -> Iterator[dict[str, Any]]:
-    """Yield up to `limit` failed runs created after `since`, newest first."""
+    """Yield up to `limit` failed runs created after `since`, newest first.
+
+    Runs of GitHub-managed or bot workflows (see rules.run_skip_reason) are dropped here
+    and don't count toward `limit`, so the cap is spent on real build failures.
+    """
     seen = 0
     page = 1
     while seen < limit:
@@ -88,6 +93,8 @@ def list_failed_runs(
         for run in runs:
             # `created` filters by day; trim to the exact cutoff.
             if parse_time(run["created_at"]) < since:
+                continue
+            if run_skip_reason(run):
                 continue
             yield run
             seen += 1
@@ -223,7 +230,8 @@ def mine_repo(
                 head_branch=run.get("head_branch"),
                 head_sha=run["head_sha"],
                 # Cached per (workflow, branch), so this costs at most one lookup per branch.
-                fix_sha=fixes.fix_sha(run),
+                # Fork branches can't be paired with the base repo's runs; skip the lookup.
+                fix_sha=None if is_fork_run(run, repo) else fixes.fix_sha(run),
                 failed_steps=failed_step_names(job),
                 runner_os=runner_os_from_labels(job.get("labels") or []),
                 created_at=run["created_at"],

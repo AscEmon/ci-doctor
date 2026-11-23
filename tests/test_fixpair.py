@@ -33,6 +33,7 @@ def run(
         "id": run_id,
         "name": "CI",
         "path": ".github/workflows/ci.yml",
+        "head_repository": {"full_name": REPO},
         "workflow_id": workflow_id,
         "event": "push",
         "head_branch": branch,
