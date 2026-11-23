@@ -4,7 +4,7 @@ import random
 import sqlite3
 from collections import Counter
 from collections.abc import Iterator
-from dataclasses import replace
+from dataclasses import asdict, replace
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -26,6 +26,7 @@ from cidoc.labeling.labels import (
 from cidoc.labeling.session import (
     Candidate,
     cap_per_run,
+    count_unlabeled_over_redacted,
     load_candidates,
     pick_stratified,
     run_session,
@@ -389,3 +390,50 @@ def test_label_command_samples_one_job_per_run_by_default(
 
     assert result.exit_code == 0, result.output
     assert expected in result.output
+
+
+def mark_over_redacted(conn: sqlite3.Connection, job_id: int) -> None:
+    conn.execute("UPDATE failures SET over_redacted = 1 WHERE job_id = ?", (job_id,))
+    conn.commit()
+
+
+def test_load_candidates_skips_over_redacted_by_default(db: sqlite3.Connection) -> None:
+    mark_over_redacted(db, 12)
+
+    assert [c.job_id for c in load_candidates(db, exclude=set())] == [11]
+    assert [c.job_id for c in load_candidates(db, set(), include_over_redacted=True)] == [11, 12]
+    assert count_unlabeled_over_redacted(db, exclude=set()) == 1
+    assert count_unlabeled_over_redacted(db, exclude={12}) == 0
+
+
+@pytest.mark.parametrize(
+    ("args", "expected"),
+    [
+        ([], "Nothing left to label."),
+        (["--include-over-redacted"], "1 labeled so far; 1 unlabeled; picked 1."),
+    ],
+)
+def test_label_command_skips_over_redacted(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    db: sqlite3.Connection,
+    args: list[str],
+    expected: str,
+) -> None:
+    (tmp_path / "data" / "labels.jsonl").write_text(
+        json.dumps(asdict(make_label(11))) + "\n", encoding="utf-8"
+    )
+    mark_over_redacted(db, 12)  # the only unlabeled job left
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("GITHUB_TOKEN", "test-github-token-value")
+    monkeypatch.setenv("DATA_DIR", str(tmp_path / "data"))
+    get_settings.cache_clear()
+    monkeypatch.setattr(typer, "getchar", lambda: "q")
+
+    result = CliRunner().invoke(app, ["label", "--n", "5", "--seed", "1", *args])
+    get_settings.cache_clear()
+
+    assert result.exit_code == 0, result.output
+    assert expected in result.output
+    hint = "Skipping 1 over-redacted logs (--include-over-redacted to label them)."
+    assert (hint in result.output) is (not args)

@@ -16,7 +16,13 @@ from cidoc.config import get_settings
 from cidoc.db import DB_FILENAME, connect
 from cidoc.github_client import GitHubClient
 from cidoc.labeling.labels import LABELS_FILENAME, load_labels
-from cidoc.labeling.session import cap_per_run, load_candidates, pick_stratified, run_session
+from cidoc.labeling.session import (
+    cap_per_run,
+    count_unlabeled_over_redacted,
+    load_candidates,
+    pick_stratified,
+    run_session,
+)
 from cidoc.miner.discover import RepoInfo, discover
 from cidoc.miner.prune import apply_prune, plan_prune
 from cidoc.miner.redaction_report import (
@@ -403,6 +409,13 @@ def label(
             help="Max jobs to label per workflow run, counting earlier labels (0 = no limit).",
         ),
     ] = 1,
+    include_over_redacted: Annotated[
+        bool,
+        typer.Option(
+            "--include-over-redacted",
+            help="Also offer logs marked over_redacted (old masks hid context; log expired).",
+        ),
+    ] = False,
 ) -> None:
     """Label unlabeled failures by hand; answers are appended to labels.jsonl."""
     data_dir = get_settings().data_dir
@@ -414,9 +427,16 @@ def label(
     existing = load_labels(labels_path, on_bad_line=warn_bad_line)
     conn = open_db()
     try:
-        candidates = load_candidates(conn, exclude={lbl.job_id for lbl in existing})
+        labeled_ids = {lbl.job_id for lbl in existing}
+        candidates = load_candidates(conn, labeled_ids, include_over_redacted)
+        hidden = 0 if include_over_redacted else count_unlabeled_over_redacted(conn, labeled_ids)
     finally:
         conn.close()
+    if hidden:
+        console.print(
+            f"[dim]Skipping {hidden} over-redacted logs"
+            " (--include-over-redacted to label them).[/dim]"
+        )
     rng = random.Random(seed)  # noqa: S311 - sampling order only, not security
     unlabeled = len(candidates)
     if max_per_run:

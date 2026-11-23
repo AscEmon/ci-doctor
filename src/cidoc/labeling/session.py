@@ -54,10 +54,19 @@ class QuitRequestedError(Exception):
     """The labeler asked to stop; nothing partial is written."""
 
 
-def load_candidates(conn: sqlite3.Connection, exclude: set[int]) -> list[Candidate]:
+def load_candidates(
+    conn: sqlite3.Connection, exclude: set[int], include_over_redacted: bool = False
+) -> list[Candidate]:
+    """Unlabeled failures, minus `exclude`.
+
+    Logs marked over_redacted lost context to old redaction rules and could not be
+    refetched; they are left out unless `include_over_redacted` is set.
+    """
     rows = conn.execute(
         "SELECT job_id, repo, run_id, workflow_name, workflow_path, event, head_branch,"
-        " failed_steps, runner_os, log_path FROM failures ORDER BY job_id"
+        " failed_steps, runner_os, log_path FROM failures"
+        " WHERE over_redacted = 0 OR ? ORDER BY job_id",
+        (include_over_redacted,),
     )
     return [
         Candidate(
@@ -75,6 +84,12 @@ def load_candidates(conn: sqlite3.Connection, exclude: set[int]) -> list[Candida
         for row in rows
         if row["job_id"] not in exclude
     ]
+
+
+def count_unlabeled_over_redacted(conn: sqlite3.Connection, exclude: set[int]) -> int:
+    """How many logs load_candidates leaves out by default."""
+    rows = conn.execute("SELECT job_id FROM failures WHERE over_redacted = 1")
+    return sum(row[0] not in exclude for row in rows)
 
 
 def cap_per_run(
