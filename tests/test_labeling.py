@@ -4,6 +4,7 @@ import random
 import sqlite3
 from collections import Counter
 from collections.abc import Iterator
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -22,7 +23,13 @@ from cidoc.labeling.labels import (
     load_labels,
     parse_evidence,
 )
-from cidoc.labeling.session import Candidate, load_candidates, pick_stratified, run_session
+from cidoc.labeling.session import (
+    Candidate,
+    cap_per_run,
+    load_candidates,
+    pick_stratified,
+    run_session,
+)
 from cidoc.miner.discover import RepoInfo, save_repo
 from cidoc.miner.runs import FailedJob, insert_failure
 
@@ -120,6 +127,40 @@ def test_pick_stratified_accounts_for_earlier_labels() -> None:
     picked = pick_stratified(pool, ["o/a", "o/a", "o/a"], n=3, rng=seeded(1))
 
     assert [c.repo for c in picked] == ["o/b", "o/b", "o/b"]
+
+
+def in_run(job_id: int, run_id: int, repo: str = "o/a") -> Candidate:
+    return replace(candidate(job_id, repo), run_id=run_id)
+
+
+def test_cap_per_run_keeps_one_job_per_run() -> None:
+    pool = [in_run(1, 100), in_run(2, 100), in_run(3, 100), in_run(4, 200), in_run(5, 100, "o/b")]
+
+    kept = cap_per_run(pool, [], max_per_run=1, rng=seeded(0))
+
+    assert Counter((c.repo, c.run_id) for c in kept) == {
+        ("o/a", 100): 1,
+        ("o/a", 200): 1,
+        ("o/b", 100): 1,  # same run id in another repo is a different run
+    }
+    assert [c.job_id for c in kept] == sorted(c.job_id for c in kept)  # input order kept
+
+
+def test_cap_per_run_counts_earlier_labels() -> None:
+    pool = [in_run(1, 100), in_run(2, 100), in_run(3, 200), in_run(4, 300), in_run(5, 300)]
+
+    kept = cap_per_run(pool, [("o/a", 100), ("o/a", 300)], max_per_run=2, rng=seeded(0))
+
+    assert Counter(c.run_id for c in kept) == {100: 1, 200: 1, 300: 1}
+
+
+def test_cap_per_run_choice_is_random_but_seeded() -> None:
+    pool = [in_run(i, 100) for i in range(20)]
+
+    picks = {cap_per_run(pool, [], 1, seeded(s))[0].job_id for s in range(10)}
+
+    assert len(picks) > 1
+    assert cap_per_run(pool, [], 1, seeded(3)) == cap_per_run(pool, [], 1, seeded(3))
 
 
 def test_pick_stratified_returns_all_when_n_exceeds_pool() -> None:
@@ -241,7 +282,7 @@ def db(tmp_path: Path) -> Iterator[sqlite3.Connection]:
             FailedJob(
                 job_id=job_id,
                 repo="o/a",
-                run_id=1,
+                run_id=job_id,  # separate runs, so the one-per-run cap doesn't apply
                 workflow_name="CI",
                 workflow_path=".github/workflows/ci.yml",
                 event="push",
@@ -293,3 +334,58 @@ def test_label_command_resumes(
     assert second.exit_code == 0, second.output
     assert "1 labeled so far; 1 unlabeled; picked 1." in second.output
     assert "Stopped: 0 labeled, 0 skipped (1 total" in second.output
+
+
+def add_job_to_run(conn: sqlite3.Connection, data_dir: Path, job_id: int, run_id: int) -> None:
+    c = in_run(job_id, run_id)
+    insert_failure(
+        conn,
+        FailedJob(
+            job_id=job_id,
+            repo=c.repo,
+            run_id=run_id,
+            workflow_name="CI",
+            workflow_path=".github/workflows/ci.yml",
+            event="push",
+            head_branch="main",
+            head_sha="abc",
+            fix_sha=None,
+            failed_steps=["Build"],
+            runner_os="Linux",
+            created_at="2026-10-20T00:00:00Z",
+            log_path=c.log_path,
+            log_bytes=1,
+            redactions=0,
+        ),
+    )
+    write_log(data_dir, c)
+
+
+@pytest.mark.parametrize(
+    ("args", "expected"),
+    [
+        ([], "0 labeled so far; 4 unlabeled (2 eligible at 1 per run); picked 2."),
+        (["--max-per-run", "0"], "0 labeled so far; 4 unlabeled; picked 4."),
+    ],
+)
+def test_label_command_samples_one_job_per_run_by_default(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    db: sqlite3.Connection,
+    args: list[str],
+    expected: str,
+) -> None:
+    # The db fixture holds jobs 11 and 12 in runs 11 and 12; add two matrix legs to run 12.
+    add_job_to_run(db, tmp_path / "data", 13, 12)
+    add_job_to_run(db, tmp_path / "data", 14, 12)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("GITHUB_TOKEN", "test-github-token-value")
+    monkeypatch.setenv("DATA_DIR", str(tmp_path / "data"))
+    get_settings.cache_clear()
+    monkeypatch.setattr(typer, "getchar", lambda: "q")
+
+    result = CliRunner().invoke(app, ["label", "--n", "10", "--seed", "1", *args])
+    get_settings.cache_clear()
+
+    assert result.exit_code == 0, result.output
+    assert expected in result.output

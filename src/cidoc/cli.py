@@ -16,7 +16,7 @@ from cidoc.config import get_settings
 from cidoc.db import DB_FILENAME, connect
 from cidoc.github_client import GitHubClient
 from cidoc.labeling.labels import LABELS_FILENAME, load_labels
-from cidoc.labeling.session import load_candidates, pick_stratified, run_session
+from cidoc.labeling.session import cap_per_run, load_candidates, pick_stratified, run_session
 from cidoc.miner.discover import RepoInfo, discover
 from cidoc.miner.prune import apply_prune, plan_prune
 from cidoc.miner.redaction_report import (
@@ -277,8 +277,11 @@ def count_table(title: str, label: str, rows: list[tuple[str, int]], total: int)
 @mine_app.command("stats")
 def mine_stats(
     top_steps: Annotated[int, typer.Option(help="How many failed step names to list.")] = 20,
+    top_dups: Annotated[
+        int, typer.Option(help="How many likely matrix-duplicate runs to list.")
+    ] = 10,
 ) -> None:
-    """Summarize mined failures per repo, runner OS, and failed step."""
+    """Summarize mined failures per repo, runner OS, failed step, and run."""
     conn = open_db()
     try:
         stats = collect_stats(conn, top_steps=top_steps)
@@ -290,6 +293,16 @@ def mine_stats(
         f"{stats.with_fix} ({pct(stats.with_fix, stats.jobs):.1f}%) have a fix_sha; "
         f"{stats.redactions} secrets redacted."
     )
+    console.print(
+        f"{stats.runs} unique runs; {stats.jobs_per_run:.2f} failed jobs per run on average."
+    )
+    if stats.matrix_duplicates:
+        console.print(
+            f"[yellow]{len(stats.matrix_duplicates)} runs have likely matrix duplicates"
+            f"[/yellow] (several jobs failing at the same first step): "
+            f"{stats.duplicate_jobs} jobs ({pct(stats.duplicate_jobs, stats.jobs):.1f}%) "
+            "are repeats. `cidoc label` samples one job per run by default."
+        )
 
     repos = Table(title="Per repo")
     repos.add_column("repo")
@@ -302,12 +315,28 @@ def mine_stats(
     console.print(
         count_table(f"Top {top_steps} failed steps", "step", stats.per_failed_step, stats.jobs)
     )
+    if stats.matrix_duplicates:
+        dups = Table(title=f"Likely matrix duplicates (top {top_dups})")
+        dups.add_column("repo")
+        dups.add_column("run_id", justify="right")
+        dups.add_column("first failed step")
+        dups.add_column("jobs", justify="right")
+        for d in stats.matrix_duplicates[:top_dups]:
+            dups.add_row(d.repo, str(d.run_id), d.step, str(d.jobs))
+        console.print(dups)
 
 
 @app.command("label")
 def label(
     n: Annotated[int, typer.Option("--n", help="How many failures to label this session.")] = 50,
     seed: Annotated[int | None, typer.Option(help="Random seed for a reproducible pick.")] = None,
+    max_per_run: Annotated[
+        int,
+        typer.Option(
+            min=0,
+            help="Max jobs to label per workflow run, counting earlier labels (0 = no limit).",
+        ),
+    ] = 1,
 ) -> None:
     """Label unlabeled failures by hand; answers are appended to labels.jsonl."""
     data_dir = get_settings().data_dir
@@ -323,13 +352,20 @@ def label(
     finally:
         conn.close()
     rng = random.Random(seed)  # noqa: S311 - sampling order only, not security
+    unlabeled = len(candidates)
+    if max_per_run:
+        labeled_runs = [(lbl.repo, lbl.run_id) for lbl in existing]
+        candidates = cap_per_run(candidates, labeled_runs, max_per_run, rng)
     picks = pick_stratified(candidates, [lbl.repo for lbl in existing], n, rng)
     if not picks:
         console.print("Nothing left to label.")
         return
 
+    capped = ""
+    if len(candidates) < unlabeled:
+        capped = f" ({len(candidates)} eligible at {max_per_run} per run)"
     console.print(
-        f"{len(existing)} labeled so far; {len(candidates)} unlabeled; picked {len(picks)}."
+        f"{len(existing)} labeled so far; {unlabeled} unlabeled{capped}; picked {len(picks)}."
     )
     result = run_session(
         console,

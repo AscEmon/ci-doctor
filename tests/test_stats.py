@@ -11,7 +11,7 @@ from cidoc.config import get_settings
 from cidoc.db import DB_FILENAME, connect
 from cidoc.miner.discover import RepoInfo, save_repo
 from cidoc.miner.runs import FailedJob, insert_failure
-from cidoc.miner.stats import RepoStats, collect_stats, pct
+from cidoc.miner.stats import MatrixDuplicate, RepoStats, collect_stats, pct
 
 NOW = datetime(2026, 10, 31, tzinfo=UTC)
 
@@ -74,6 +74,25 @@ def test_collect_stats(conn: sqlite3.Connection) -> None:
     assert stats.per_failed_step == [("Build APK", 2), ("Test", 2)]
 
 
+def test_run_level_stats_and_matrix_duplicates(conn: sqlite3.Connection) -> None:
+    populate(conn)  # run 1 (o/a): jobs 11, 12, 13; run 2 (o/b): job 21
+    # Same run id in another repo must not merge with o/a's run 1.
+    insert_failure(conn, failure(14, "o/b", ["Build APK"]))
+    insert_failure(conn, failure(15, "o/b", ["Build APK"]))
+
+    stats = collect_stats(conn)
+
+    assert stats.runs == 3
+    assert stats.jobs_per_run == 2.0
+    # 11 and 12 both broke first at "Build APK" (12 also failed "Test" afterwards);
+    # 13 broke first at "Test", so it is not a repeat. 21 has no step info.
+    assert stats.matrix_duplicates == [
+        MatrixDuplicate("o/a", 1, "Build APK", 2),
+        MatrixDuplicate("o/b", 1, "Build APK", 2),
+    ]
+    assert stats.duplicate_jobs == 2
+
+
 def test_collect_stats_limits_steps(conn: sqlite3.Connection) -> None:
     populate(conn)
 
@@ -87,6 +106,7 @@ def test_collect_stats_on_empty_db(conn: sqlite3.Connection) -> None:
     assert stats.per_repo == []
     assert stats.per_runner_os == []
     assert stats.per_failed_step == []
+    assert (stats.runs, stats.jobs_per_run, stats.matrix_duplicates) == (0, 0.0, [])
 
 
 def test_pct_handles_zero() -> None:
@@ -110,4 +130,8 @@ def test_stats_command(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     assert result.exit_code == 0, result.output
     assert "4 failed jobs across 3 repos; 3 (75.0%) have a fix_sha" in result.output
     assert "Build APK" in result.output
+    assert "2 unique runs; 2.00 failed jobs per run on average." in result.output
+    assert "1 runs have likely matrix duplicates" in result.output
+    assert "1 jobs (25.0%) are repeats" in result.output
+    assert "Likely matrix duplicates" in result.output
     assert "o/empty" in result.output

@@ -4,7 +4,7 @@ import json
 import random
 import sqlite3
 from collections import Counter, defaultdict
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -75,6 +75,30 @@ def load_candidates(conn: sqlite3.Connection, exclude: set[int]) -> list[Candida
         for row in rows
         if row["job_id"] not in exclude
     ]
+
+
+def cap_per_run(
+    candidates: Sequence[Candidate],
+    already_labeled_runs: Iterable[tuple[str, int]],
+    max_per_run: int,
+    rng: random.Random,
+) -> list[Candidate]:
+    """Keep at most `max_per_run` jobs per (repo, run_id), counting earlier sessions' labels.
+
+    Failed jobs in one run are often matrix legs with the same error, so labeling more
+    than one mostly repeats work and skews the label set toward wide matrices. Which
+    jobs are kept is random. Input order is preserved.
+    """
+    shuffled = list(candidates)
+    rng.shuffle(shuffled)
+    taken = Counter(already_labeled_runs)
+    keep: set[int] = set()
+    for c in shuffled:
+        key = (c.repo, c.run_id)
+        if taken[key] < max_per_run:
+            taken[key] += 1
+            keep.add(c.job_id)
+    return [c for c in candidates if c.job_id in keep]
 
 
 def pick_stratified(
