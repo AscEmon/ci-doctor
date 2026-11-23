@@ -5,15 +5,23 @@ A fix_sha equal to the failing head_sha means a re-run passed with no code chang
 is itself a strong hint that the failure was flaky.
 """
 
+import logging
 from collections.abc import Iterable
 from datetime import datetime
 from typing import Any
 
+import httpx
+
 from cidoc.github_client import GitHubClient
+
+logger = logging.getLogger(__name__)
 
 RUNS_PAGE_SIZE = 100
 # Busy branches can have many green runs; we only need the earliest few after a failure.
 MAX_SUCCESS_PAGES = 5
+# The workflow runs endpoint answers these for workflows it can't list (e.g. dynamic or
+# deleted workflows). Fix pairs are optional metadata, so treat them as "no fix found".
+UNLISTABLE_WORKFLOW_STATUSES = frozenset({404, 422})
 
 
 def _created(run: dict[str, Any]) -> datetime:
@@ -76,5 +84,17 @@ class FixPairFinder:
             return None
         key = (failed_run["workflow_id"], branch)
         if key not in self._cache:
-            self._cache[key] = list_success_runs(self._client, self._repo, *key, self._since)
+            try:
+                self._cache[key] = list_success_runs(self._client, self._repo, *key, self._since)
+            except httpx.HTTPStatusError as exc:
+                status = exc.response.status_code
+                if status not in UNLISTABLE_WORKFLOW_STATUSES:
+                    raise
+                logger.warning(
+                    "fix-pair lookup skipped: %s workflow %s returned HTTP %s",
+                    self._repo,
+                    key[0],
+                    status,
+                )
+                self._cache[key] = []
         return find_fix_sha(failed_run, self._cache[key])

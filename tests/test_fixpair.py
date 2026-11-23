@@ -125,6 +125,39 @@ def test_finder_caches_per_workflow_and_branch() -> None:
     assert calls == ["main"]
 
 
+@pytest.mark.parametrize("status", [404, 422])
+def test_finder_treats_unlistable_workflow_as_no_fix(
+    status: int, caplog: pytest.LogCaptureFixture
+) -> None:
+    calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.url.path)
+        return httpx.Response(status, json={"message": "Not Found"})
+
+    with GitHubClient(FAKE_TOKEN, transport=httpx.MockTransport(handler)) as client:
+        finder = FixPairFinder(client, REPO, SINCE)
+        first = finder.fix_sha(FAILED)
+        second = finder.fix_sha(run(15, "2026-10-15T00:00:00Z", conclusion="failure"))
+
+    assert (first, second) == (None, None)
+    assert len(calls) == 1  # the empty result is cached for the (workflow, branch) key
+    [record] = caplog.records
+    assert record.levelname == "WARNING"
+    assert REPO in record.getMessage()
+    assert "workflow 7" in record.getMessage()
+
+
+def test_finder_propagates_other_http_errors() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(403, json={"message": "Forbidden"})
+
+    with GitHubClient(FAKE_TOKEN, transport=httpx.MockTransport(handler)) as client:
+        finder = FixPairFinder(client, REPO, SINCE)
+        with pytest.raises(httpx.HTTPStatusError):
+            finder.fix_sha(FAILED)
+
+
 @pytest.fixture
 def conn(tmp_path: Path) -> Iterator[sqlite3.Connection]:
     db = connect(tmp_path / "cidoc.db")
