@@ -251,6 +251,7 @@ def test_mine_repo_stores_failed_jobs_with_redacted_gzipped_logs(
     assert row["runner_os"] == "macOS"
     assert row["log_path"] == "logs/acme__app/1001.log.gz"
     assert row["redactions"] == 1
+    assert json.loads(row["redaction_counts"]) == {"github_token": 1}
 
     text = gzip.decompress((tmp_path / row["log_path"]).read_bytes()).decode()
     assert text == "Step 1\nexport GITHUB_TOKEN=[REDACTED:github_token]\nBUILD FAILED\n"

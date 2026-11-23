@@ -37,6 +37,11 @@ _PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
 )
 
 
+RULE_NAMES: tuple[str, ...] = tuple(kind for kind, _ in _PATTERNS)
+# What a masked value looks like in a stored log; group 1 is the rule name.
+MASK_RE = re.compile(r"\[REDACTED:([a-z_]+)\]")
+
+
 def _mask(kind: str) -> str:
     return f"[REDACTED:{kind}]"
 

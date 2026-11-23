@@ -10,6 +10,7 @@ from typing import Annotated
 import typer
 from rich.console import Console
 from rich.table import Table
+from rich.text import Text
 
 from cidoc.config import get_settings
 from cidoc.db import DB_FILENAME, connect
@@ -18,6 +19,11 @@ from cidoc.labeling.labels import LABELS_FILENAME, load_labels
 from cidoc.labeling.session import load_candidates, pick_stratified, run_session
 from cidoc.miner.discover import RepoInfo, discover
 from cidoc.miner.prune import apply_prune, plan_prune
+from cidoc.miner.redaction_report import (
+    CONTEXT_CHARS,
+    EXAMPLES_PER_RULE,
+    collect_redaction_report,
+)
 from cidoc.miner.rules import RepoExcludes, load_repo_excludes
 from cidoc.miner.runs import FailedJob, mine_repo, repos_to_mine
 from cidoc.miner.seeds import SEED_FILENAME, add_seed_repos
@@ -207,6 +213,55 @@ def mine_prune(
         f"Deleted {result.failures} failures, {result.log_files} log files, "
         f"{result.mined_runs} mined-run markers, {result.repos} repos."
     )
+
+
+@mine_app.command("redaction-report")
+def mine_redaction_report(
+    examples: Annotated[
+        int, typer.Option(help="Random masked examples to show per rule.")
+    ] = EXAMPLES_PER_RULE,
+    context: Annotated[
+        int, typer.Option(help="Characters of log context either side of each mask.")
+    ] = CONTEXT_CHARS,
+    seed: Annotated[int | None, typer.Option(help="Random seed for reproducible examples.")] = None,
+) -> None:
+    """Audit redactions: counts per rule and masked examples in context (never unmasked)."""
+    data_dir = get_settings().data_dir
+    conn = open_db()
+    try:
+        rng = random.Random(seed)  # noqa: S311 - sampling order only, not security
+        report = collect_redaction_report(conn, data_dir, rng, examples, context)
+    finally:
+        conn.close()
+
+    if not report.rules:
+        console.print("No redactions in stored logs.")
+    else:
+        table = Table(title=f"Redactions in {report.logs_with_redactions} logs")
+        table.add_column("rule")
+        table.add_column("redactions", justify="right")
+        table.add_column("logs", justify="right")
+        for rule in report.rules:
+            table.add_row(rule.rule, str(rule.redactions), str(rule.logs))
+        console.print(table)
+    if report.logs_counted_from_markers:
+        console.print(
+            f"[dim]{report.logs_counted_from_markers} logs predate per-rule tracking;"
+            " their counts come from the masks in the stored log.[/dim]"
+        )
+    if report.logs_missing:
+        console.print(
+            f"[yellow]{len(report.logs_missing)} log files are missing[/yellow] and were skipped."
+        )
+
+    for rule in report.rules:
+        console.print(f"\n[bold]{rule.rule}[/bold] ({len(rule.examples)} examples)")
+        for ex in rule.examples:
+            # Logs are untrusted text: print without markup so [REDACTED:...] and any
+            # bracketed log content render literally.
+            console.print(
+                Text.assemble((f"  {ex.repo} job {ex.job_id} L{ex.line_no}: ", "dim"), ex.snippet)
+            )
 
 
 def count_table(title: str, label: str, rows: list[tuple[str, int]], total: int) -> Table:

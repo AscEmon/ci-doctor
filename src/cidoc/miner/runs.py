@@ -6,7 +6,7 @@ import logging
 import os
 import sqlite3
 from collections.abc import Callable, Iterator, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -52,6 +52,8 @@ class FailedJob:
     log_path: str
     log_bytes: int
     redactions: int
+    redaction_counts: dict[str, int] = field(default_factory=dict)
+    """Redactions per rule; sums to `redactions`."""
 
 
 @dataclass(frozen=True)
@@ -138,8 +140,8 @@ def download_job_log(client: GitHubClient, repo: str, job_id: int) -> bytes | No
         raise
 
 
-def store_log(data_dir: Path, relpath: Path, raw: bytes) -> tuple[int, int]:
-    """Redact and gzip a log under `data_dir`. Returns (uncompressed bytes, redaction count).
+def store_log(data_dir: Path, relpath: Path, raw: bytes) -> tuple[int, dict[str, int]]:
+    """Redact and gzip a log under `data_dir`. Returns (uncompressed bytes, counts per rule).
 
     Writes to a temp file and renames, so an interrupted run never leaves a half-written log.
     """
@@ -151,7 +153,7 @@ def store_log(data_dir: Path, relpath: Path, raw: bytes) -> tuple[int, int]:
     with gzip.open(tmp, "wb") as fh:
         fh.write(payload)
     os.replace(tmp, dest)
-    return len(payload), result.total
+    return len(payload), dict(result.counts)
 
 
 def insert_failure(conn: sqlite3.Connection, job: FailedJob) -> None:
@@ -159,8 +161,8 @@ def insert_failure(conn: sqlite3.Connection, job: FailedJob) -> None:
         conn.execute(
             "INSERT INTO failures (job_id, repo, run_id, workflow_name, workflow_path, event,"
             " head_branch, head_sha, fix_sha, failed_steps, runner_os, created_at, log_path,"
-            " log_bytes, redactions)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            " log_bytes, redactions, redaction_counts)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 job.job_id,
                 job.repo,
@@ -177,6 +179,7 @@ def insert_failure(conn: sqlite3.Connection, job: FailedJob) -> None:
                 job.log_path,
                 job.log_bytes,
                 job.redactions,
+                json.dumps(job.redaction_counts, sort_keys=True),
             ),
         )
 
@@ -257,7 +260,7 @@ def _mine_run(
                 on_job(None, job["id"])
             continue
         relpath = log_relpath(repo, job["id"])
-        log_bytes, redactions = store_log(data_dir, relpath, raw)
+        log_bytes, redaction_counts = store_log(data_dir, relpath, raw)
         failure = FailedJob(
             job_id=job["id"],
             repo=repo,
@@ -275,7 +278,8 @@ def _mine_run(
             created_at=run["created_at"],
             log_path=relpath.as_posix(),
             log_bytes=log_bytes,
-            redactions=redactions,
+            redactions=sum(redaction_counts.values()),
+            redaction_counts=redaction_counts,
         )
         insert_failure(conn, failure)
         stored += 1

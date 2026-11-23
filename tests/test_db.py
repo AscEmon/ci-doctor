@@ -39,7 +39,24 @@ def test_connect_creates_db_and_schema(tmp_path: Path) -> None:
         "log_path",
         "log_bytes",
         "redactions",
+        "redaction_counts",
     ]
+    conn.close()
+
+
+def test_redaction_counts_migration_defaults_existing_rows(tmp_path: Path) -> None:
+    conn = sqlite3.connect(tmp_path / "cidoc.db")
+    migrate(conn, MIGRATIONS[:3])
+    conn.execute("INSERT INTO repos VALUES ('o/r', 1, 'main', '2026-10-01')")
+    conn.execute(
+        "INSERT INTO failures (job_id, repo, run_id, workflow_name, workflow_path, event,"
+        " head_sha, failed_steps, created_at, log_path, log_bytes, redactions)"
+        " VALUES (1, 'o/r', 1, 'CI', 'ci.yml', 'push', 'abc', '[]', '2026-10-01', 'x', 1, 2)"
+    )
+    conn.commit()
+
+    assert migrate(conn) == len(MIGRATIONS)
+    assert conn.execute("SELECT redaction_counts FROM failures").fetchone()[0] == "{}"
     conn.close()
 
 

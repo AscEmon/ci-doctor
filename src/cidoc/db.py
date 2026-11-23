@@ -50,6 +50,12 @@ MIGRATIONS: tuple[str, ...] = (
         mined_at TEXT NOT NULL
     );
     """,
+    """
+    -- Per-rule redaction counts for the stored log, as a JSON object {rule: count}.
+    -- '{}' on rows mined before this column existed; their logs still carry the
+    -- [REDACTED:<rule>] markers, which the redaction report counts instead.
+    ALTER TABLE failures ADD COLUMN redaction_counts TEXT NOT NULL DEFAULT '{}';
+    """,
 )
 
 
