@@ -25,6 +25,12 @@ class RetryableHTTPError(httpx.HTTPStatusError):
     """A 5xx or rate-limit response that is worth retrying."""
 
 
+# Dropped connections, timeouts and connect failures are transient: retry them with the
+# same exponential backoff as 5xx. TransportError covers RemoteProtocolError,
+# ReadTimeout, ConnectError and friends; HTTP status errors are not TransportErrors.
+_RETRYABLE_EXCEPTIONS = (RetryableHTTPError, httpx.TransportError)
+
+
 def _is_primary_rate_limit_exhausted(response: httpx.Response) -> bool:
     remaining: str | None = response.headers.get("X-RateLimit-Remaining")
     return remaining == "0"
@@ -75,7 +81,7 @@ class GitHubClient:
             transport=transport,
         )
         self._retrying = Retrying(
-            retry=retry_if_exception_type(RetryableHTTPError),
+            retry=retry_if_exception_type(_RETRYABLE_EXCEPTIONS),
             wait=self._wait,
             stop=stop_after_attempt(max_attempts),
             sleep=sleep,

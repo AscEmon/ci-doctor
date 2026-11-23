@@ -129,6 +129,64 @@ def test_does_not_retry_client_errors() -> None:
     assert sleeps == []
 
 
+def make_flaky_transport_client(
+    failures: list[Exception], sleeps: list[float], max_attempts: int = 5
+) -> tuple[GitHubClient, list[httpx.Request]]:
+    """Client whose first len(failures) requests raise, then answer 200 {}."""
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        if len(seen) <= len(failures):
+            raise failures[len(seen) - 1]
+        return httpx.Response(200, json={})
+
+    client = GitHubClient(
+        FAKE_TOKEN,
+        transport=httpx.MockTransport(handler),
+        max_attempts=max_attempts,
+        sleep=sleeps.append,
+    )
+    return client, seen
+
+
+def test_retries_remote_protocol_error_until_success() -> None:
+    sleeps: list[float] = []
+    disconnect = httpx.RemoteProtocolError("Server disconnected without sending a response.")
+    client, seen = make_flaky_transport_client([disconnect, disconnect], sleeps)
+
+    with client:
+        assert client.get_json("/x") == {}
+
+    assert len(seen) == 3
+    assert sleeps == [1.0, 2.0]
+
+
+@pytest.mark.parametrize(
+    "error", [httpx.ReadTimeout("read timed out"), httpx.ConnectError("connection refused")]
+)
+def test_retries_other_transport_errors(error: Exception) -> None:
+    sleeps: list[float] = []
+    client, seen = make_flaky_transport_client([error], sleeps)
+
+    with client:
+        assert client.get_json("/x") == {}
+
+    assert len(seen) == 2
+
+
+def test_gives_up_on_transport_error_after_max_attempts() -> None:
+    sleeps: list[float] = []
+    disconnect = httpx.RemoteProtocolError("Server disconnected without sending a response.")
+    client, seen = make_flaky_transport_client([disconnect] * 5, sleeps)
+
+    with client, pytest.raises(httpx.RemoteProtocolError):
+        client.get_json("/x")
+
+    assert len(seen) == 5
+    assert sleeps == [1.0, 2.0, 4.0, 8.0]
+
+
 FAKE_NOW = 1_700_000_000.0
 
 
