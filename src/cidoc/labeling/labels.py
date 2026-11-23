@@ -26,14 +26,21 @@ CATEGORY_KEYS: dict[str, str] = {
     "9": "ios_build",
     "0": "infra_flaky",
     "t": "timeout_resource",
+    "c": "ci_config",  # added in the Phase 0 wrap-up, after the first 44 labels
     "o": "other",
 }
+
+# Every category, in menu order. The one list other code (e.g. an analyzer's output
+# schema) should take its enum from. Categories are only ever added, never renamed or
+# removed, so existing labels stay valid.
+CATEGORIES: tuple[str, ...] = tuple(CATEGORY_KEYS.values())
 
 CATEGORY_HINTS: dict[str, str] = {
     "native_compile": "kotlin/java/c++",
     "toolchain_version": "flutter/java/xcode version mismatch",
     "ios_build": "cocoapods/xcode",
     "infra_flaky": "network, runner, cache",
+    "ci_config": "workflow, CI scripts, runner setup, secrets not passed",
 }
 
 CONFIDENCE_LEVELS = (1, 2, 3)

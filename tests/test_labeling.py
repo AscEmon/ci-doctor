@@ -17,6 +17,7 @@ from cidoc.cli import app
 from cidoc.config import get_settings
 from cidoc.db import DB_FILENAME, connect
 from cidoc.labeling.labels import (
+    CATEGORIES,
     CATEGORY_KEYS,
     Label,
     append_label,
@@ -24,11 +25,15 @@ from cidoc.labeling.labels import (
     parse_evidence,
 )
 from cidoc.labeling.session import (
+    QUIT_KEYS,
+    SKIP_KEY,
+    TOGGLE_VIEW_KEY,
     Candidate,
     cap_per_run,
     count_unlabeled_over_redacted,
     load_candidates,
     pick_stratified,
+    render_menu,
     run_session,
 )
 from cidoc.miner.discover import RepoInfo, save_repo
@@ -71,9 +76,57 @@ def make_label(job_id: int, repo: str = "o/a") -> Label:
     )
 
 
+ORIGINAL_CATEGORIES = (
+    "dependency_resolution",
+    "gradle_agp_config",
+    "native_compile",
+    "dart_compile",
+    "analyzer_lint",
+    "test_failure",
+    "signing_secrets",
+    "toolchain_version",
+    "ios_build",
+    "infra_flaky",
+    "timeout_resource",
+    "other",
+)
+
+
+def test_ci_config_is_on_key_c_and_no_category_was_removed() -> None:
+    assert CATEGORY_KEYS["c"] == "ci_config"
+    assert set(ORIGINAL_CATEGORIES) < set(CATEGORIES)
+    assert tuple(CATEGORY_KEYS.values()) == CATEGORIES
+    # Keys of existing categories are unchanged, so muscle memory still works.
+    assert {k: v for k, v in CATEGORY_KEYS.items() if v != "ci_config"} == dict(
+        zip("1234567890to", ORIGINAL_CATEGORIES, strict=True)
+    )
+
+
+def test_ci_config_key_does_not_clash_with_session_keys() -> None:
+    assert "c" not in {SKIP_KEY, TOGGLE_VIEW_KEY, *QUIT_KEYS}
+
+
+def test_menu_lists_ci_config() -> None:
+    console = Console(record=True, width=120)
+
+    render_menu(console)
+
+    assert "c ci_config (workflow, CI scripts, runner setup, secrets not passed)" in (
+        console.export_text()
+    )
+
+
+def test_labels_with_existing_categories_still_load(tmp_path: Path) -> None:
+    path = tmp_path / "labels.jsonl"
+    for i, category in enumerate(ORIGINAL_CATEGORIES):
+        append_label(path, replace(make_label(i), category=category))
+
+    assert [lbl.category for lbl in load_labels(path)] == list(ORIGINAL_CATEGORIES)
+
+
 def test_taxonomy_keys_are_unique_single_chars() -> None:
     assert all(len(k) == 1 for k in CATEGORY_KEYS)
-    assert len(set(CATEGORY_KEYS.values())) == 12
+    assert len(set(CATEGORY_KEYS.values())) == len(CATEGORY_KEYS)  # one key per category
     assert "s" not in CATEGORY_KEYS
     assert "q" not in CATEGORY_KEYS
 
