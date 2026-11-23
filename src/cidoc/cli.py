@@ -17,6 +17,7 @@ from cidoc.github_client import GitHubClient
 from cidoc.labeling.labels import LABELS_FILENAME, load_labels
 from cidoc.labeling.session import load_candidates, pick_stratified, run_session
 from cidoc.miner.discover import RepoInfo, discover
+from cidoc.miner.prune import apply_prune, plan_prune
 from cidoc.miner.rules import RepoExcludes, load_repo_excludes
 from cidoc.miner.runs import FailedJob, mine_repo, repos_to_mine
 from cidoc.miner.seeds import SEED_FILENAME, add_seed_repos
@@ -158,6 +159,54 @@ def mine_runs(
         raise typer.Exit(130) from None
     finally:
         conn.close()
+
+
+@mine_app.command("prune")
+def mine_prune(
+    apply: Annotated[
+        bool, typer.Option("--apply", help="Actually delete. Without it, only report.")
+    ] = False,
+) -> None:
+    """Remove stored failures and logs that the mining rules now exclude (dry-run by default)."""
+    data_dir = get_settings().data_dir
+    excludes = load_excludes()
+    conn = open_db()
+    try:
+        plan = plan_prune(conn, excludes)
+        if plan.empty:
+            console.print("Nothing to prune.")
+            return
+
+        verb = "Removing" if apply else "Would remove"
+        table = Table(title=f"{verb} {len(plan.failures)} failed jobs")
+        table.add_column("reason")
+        table.add_column("jobs", justify="right")
+        for reason, count in plan.counts_by_reason():
+            table.add_row(reason, str(count))
+        console.print(table)
+        if plan.repos:
+            console.print(f"{verb} {len(plan.repos)} excluded repos from the repos table:")
+            for name, reason in plan.repos:
+                console.print(f"  {name} ({reason})")
+
+        labeled = {lbl.job_id for lbl in load_labels(data_dir / LABELS_FILENAME)}
+        pruned_labeled = sum(f.job_id in labeled for f in plan.failures)
+        if pruned_labeled:
+            console.print(
+                f"[yellow]{pruned_labeled} of these jobs are in {LABELS_FILENAME}.[/yellow]"
+                " Their labels are kept; they will no longer match a stored failure."
+            )
+
+        if not apply:
+            console.print("Dry run: nothing deleted. Rerun with --apply to delete.")
+            return
+        result = apply_prune(conn, data_dir, plan)
+    finally:
+        conn.close()
+    console.print(
+        f"Deleted {result.failures} failures, {result.log_files} log files, "
+        f"{result.mined_runs} mined-run markers, {result.repos} repos."
+    )
 
 
 def count_table(title: str, label: str, rows: list[tuple[str, int]], total: int) -> Table:
