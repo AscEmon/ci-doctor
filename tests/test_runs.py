@@ -22,6 +22,7 @@ from cidoc.miner.runs import (
     mine_repo,
     runner_os_from_labels,
 )
+from cidoc.redact import REDACTOR_VERSION
 
 # Fake value for tests only; never put real credentials here.
 FAKE_TOKEN = SecretStr("test-github-token-value")
@@ -252,6 +253,7 @@ def test_mine_repo_stores_failed_jobs_with_redacted_gzipped_logs(
     assert row["log_path"] == "logs/acme__app/1001.log.gz"
     assert row["redactions"] == 1
     assert json.loads(row["redaction_counts"]) == {"github_token": 1}
+    assert (row["redactor_version"], row["over_redacted"]) == (REDACTOR_VERSION, 0)
 
     text = gzip.decompress((tmp_path / row["log_path"]).read_bytes()).decode()
     assert text == "Step 1\nexport GITHUB_TOKEN=[REDACTED:github_token]\nBUILD FAILED\n"

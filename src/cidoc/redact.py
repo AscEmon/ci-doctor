@@ -15,6 +15,10 @@ import re
 from collections import Counter
 from dataclasses import dataclass, field
 
+# Bump when a rule change alters what gets masked, so stored logs redacted under older
+# rules can be found and refetched. 1: original rules. 2: narrowed keyword_secret, jwt.
+REDACTOR_VERSION = 2
+
 # keyword_secret thresholds. Random tokens of this length score ~4+ bits/char;
 # words, versions and slugs score lower.
 MIN_SECRET_LENGTH = 20

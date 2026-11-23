@@ -56,6 +56,14 @@ MIGRATIONS: tuple[str, ...] = (
     -- [REDACTED:<rule>] markers, which the redaction report counts instead.
     ALTER TABLE failures ADD COLUMN redaction_counts TEXT NOT NULL DEFAULT '{}';
     """,
+    """
+    -- cidoc.redact.REDACTOR_VERSION the stored log was redacted with. Existing rows
+    -- were redacted with the original rules (version 1).
+    ALTER TABLE failures ADD COLUMN redactor_version INTEGER NOT NULL DEFAULT 1;
+    -- 1 when the stored log is known to be over-masked by old rules but could not be
+    -- refetched (GitHub no longer has it).
+    ALTER TABLE failures ADD COLUMN over_redacted INTEGER NOT NULL DEFAULT 0;
+    """,
 )
 
 

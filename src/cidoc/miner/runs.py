@@ -16,7 +16,7 @@ import httpx
 from cidoc.github_client import GitHubClient
 from cidoc.miner.fixpair import FixPairFinder
 from cidoc.miner.rules import is_fork_run, run_skip_reason
-from cidoc.redact import redact
+from cidoc.redact import REDACTOR_VERSION, redact
 
 logger = logging.getLogger(__name__)
 
@@ -161,8 +161,8 @@ def insert_failure(conn: sqlite3.Connection, job: FailedJob) -> None:
         conn.execute(
             "INSERT INTO failures (job_id, repo, run_id, workflow_name, workflow_path, event,"
             " head_branch, head_sha, fix_sha, failed_steps, runner_os, created_at, log_path,"
-            " log_bytes, redactions, redaction_counts)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            " log_bytes, redactions, redaction_counts, redactor_version)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 job.job_id,
                 job.repo,
@@ -180,6 +180,7 @@ def insert_failure(conn: sqlite3.Connection, job: FailedJob) -> None:
                 job.log_bytes,
                 job.redactions,
                 json.dumps(job.redaction_counts, sort_keys=True),
+                REDACTOR_VERSION,
             ),
         )
 

@@ -24,6 +24,12 @@ from cidoc.miner.redaction_report import (
     EXAMPLES_PER_RULE,
     collect_redaction_report,
 )
+from cidoc.miner.refetch import (
+    RefetchTarget,
+    count_over_redacted,
+    find_refetch_targets,
+    refetch_logs,
+)
 from cidoc.miner.rules import RepoExcludes, load_repo_excludes
 from cidoc.miner.runs import FailedJob, mine_repo, repos_to_mine
 from cidoc.miner.seeds import SEED_FILENAME, add_seed_repos
@@ -262,6 +268,66 @@ def mine_redaction_report(
             console.print(
                 Text.assemble((f"  {ex.repo} job {ex.job_id} L{ex.line_no}: ", "dim"), ex.snippet)
             )
+
+
+@mine_app.command("refetch")
+def mine_refetch(
+    only_redacted: Annotated[
+        bool,
+        typer.Option(
+            "--only-redacted",
+            help="Refetch logs that older redaction rules masked with keyword_secret.",
+        ),
+    ] = False,
+    apply: Annotated[
+        bool, typer.Option("--apply", help="Actually download. Without it, only report.")
+    ] = False,
+) -> None:
+    """Re-download over-redacted logs and redact them with the current rules (dry-run default)."""
+    if not only_redacted:
+        console.print("[red]Only --only-redacted is supported for now.[/red]")
+        raise typer.Exit(2)
+    data_dir = get_settings().data_dir
+    conn = open_db()
+    try:
+        targets = find_refetch_targets(conn, data_dir)
+        already = count_over_redacted(conn)
+        if already:
+            console.print(
+                f"[dim]{already} logs are already marked over_redacted (expired on GitHub);"
+                " skipped.[/dim]"
+            )
+        if not targets:
+            console.print("Nothing to refetch.")
+            return
+        repos = len({t.repo for t in targets})
+        if not apply:
+            console.print(
+                f"Would refetch {len(targets)} logs from {repos} repos."
+                " Dry run: nothing downloaded. Rerun with --apply to refetch."
+            )
+            return
+
+        def report_expired(target: RefetchTarget) -> None:
+            console.print(
+                f"  [yellow]expired[/yellow] {target.repo} job {target.job_id}:"
+                " kept old log, marked over_redacted"
+            )
+
+        console.print(f"Refetching {len(targets)} logs from {repos} repos...")
+        try:
+            with open_github() as client:
+                result = refetch_logs(client, conn, data_dir, targets, on_expired=report_expired)
+        except KeyboardInterrupt:
+            console.print("[yellow]Interrupted.[/yellow] Finished logs are saved; rerun to resume.")
+            raise typer.Exit(130) from None
+    finally:
+        conn.close()
+    console.print(
+        f"Refetched {result.refetched}, expired {result.expired}, failed {len(result.failed)}."
+    )
+    if result.failed:
+        console.print("[yellow]Failed logs are unchanged; rerun to retry them.[/yellow]")
 
 
 def count_table(title: str, label: str, rows: list[tuple[str, int]], total: int) -> Table:
