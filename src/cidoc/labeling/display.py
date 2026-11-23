@@ -27,6 +27,21 @@ ERROR_MARKERS = (
     "Exception",
     "FAILED",
     "Could not resolve",
+    # Xcode, CocoaPods and fastlane.
+    "❌",
+    "** ARCHIVE FAILED **",
+    "** BUILD FAILED **",
+    "[!]",
+    "fastlane finished with errors",
+    "💥",
+    "Error (Xcode):",
+    "ERROR ITMS-",
+)
+# Xcode diagnostics that look alarming but never fail a build. A line with one of these
+# is not a marker even if it also contains an error marker.
+NON_ERROR_MARKERS = (
+    "Target Integrity (Xcode)",
+    "Warning (Xcode)",
 )
 
 # CSI sequences (colors, cursor moves) and OSC sequences (titles, hyperlinks).
@@ -56,7 +71,56 @@ def clean_log(text: str) -> list[str]:
 
 
 def is_marker(line: str) -> bool:
+    if any(marker in line for marker in NON_ERROR_MARKERS):
+        return False
     return any(marker in line for marker in ERROR_MARKERS)
+
+
+# fastlane's "update available" notice: a #### banner around "fastlane X is available",
+# optionally followed by the release notes, ending "To see all new releases ..." /
+# "Please update using ...". It is printed after a failure, right where the error is
+# expected, and is never a root cause.
+_FASTLANE_AVAILABLE = re.compile(r"\bfastlane [\d.]+ is available\b")
+_BANNER = re.compile(r"^#{10,}\s*$")
+_CHANGELOG_END = "To see all new releases"
+_UPDATE_HINT = "Please update using"
+# How far the release notes may run after the banner (real ones: ~150 lines).
+_CHANGELOG_MAX_LINES = 400
+LINES_BEFORE_NOISE = 40
+
+
+def fastlane_noise_blocks(lines: list[str], end: int) -> list[tuple[int, int]]:
+    """Half-open [start, stop) index ranges of fastlane update notices in lines[:end]."""
+    blocks: list[tuple[int, int]] = []
+    i = 0
+    while i < end:
+        line = lines[i]
+        if _FASTLANE_AVAILABLE.search(line):
+            start = i - 1 if i > 0 and _BANNER.match(lines[i - 1]) else i
+            stop = i + 1
+            for j in range(i + 1, min(end, i + 6)):  # closing banner
+                if _BANNER.match(lines[j]):
+                    stop = j + 1
+                    break
+        elif _CHANGELOG_END in line:
+            start, stop = i, i + 1
+        else:
+            i += 1
+            continue
+        # Extend over the release notes to "To see all new releases" + "Please update".
+        for j in range(stop, min(end, stop + _CHANGELOG_MAX_LINES)):
+            if _FASTLANE_AVAILABLE.search(lines[j]):
+                break  # the next notice starts; this one had no release notes
+            if _CHANGELOG_END in lines[j]:
+                stop = j + 1
+                break
+        for j in range(stop, min(end, stop + 3)):
+            if _UPDATE_HINT in lines[j]:
+                stop = j + 1
+                break
+        blocks.append((start, stop))
+        i = stop
+    return blocks
 
 
 def marker_windows(lines: list[str], end: int, context: int) -> list[tuple[int, int]]:
@@ -238,8 +302,11 @@ class _LogSteps:
     end: int
     """Index of 'Post job cleanup.' (or len(lines)): nothing from here on is considered."""
     hidden: set[int]
+    """Successful/skipped action blocks and fastlane update notices."""
     errors: list[int]
     failed: list[Step]
+    noise_starts: list[int]
+    """Where each fastlane update notice begins; the real error is usually just above."""
 
 
 def _locate_failed_steps(text: str, failed_steps: Iterable[str]) -> _LogSteps:
@@ -247,6 +314,9 @@ def _locate_failed_steps(text: str, failed_steps: Iterable[str]) -> _LogSteps:
     lines = clean_log(text)
     end = next((i for i, line in enumerate(lines) if line.startswith(CLEANUP_LINE)), len(lines))
     hidden = hidden_action_lines(lines, end)
+    noise = fastlane_noise_blocks(lines, end)
+    for start, stop in noise:
+        hidden.update(range(start, stop))
     errors = [i for i in range(end) if lines[i].startswith(ERROR_PREFIX) and i not in hidden]
     names = list(failed_steps)
     failed = [
@@ -254,7 +324,13 @@ def _locate_failed_steps(text: str, failed_steps: Iterable[str]) -> _LogSteps:
         for step in split_steps(lines, end)
         if any(step.start <= e < step.stop for e in errors) or _matches_failed_step(step, names)
     ]
-    return _LogSteps(lines, end, hidden, errors, failed)
+    return _LogSteps(lines, end, hidden, errors, failed, [start for start, _ in noise])
+
+
+def visible_line_numbers(text: str) -> list[int]:
+    """1-based numbers of lines before 'Post job cleanup.' that are not known noise."""
+    located = _locate_failed_steps(text, ())
+    return [i + 1 for i in range(located.end) if i not in located.hidden]
 
 
 def failed_step_lines(text: str, failed_steps: Iterable[str] = ()) -> list[str]:
@@ -295,6 +371,11 @@ def build_focus_view(text: str, failed_steps: Iterable[str] = ()) -> FocusView:
             shown.update(i for i in range(step.start + start, step.start + stop) if i not in hidden)
     for e in errors:
         shown.update(i for i in range(max(0, e - LINES_BEFORE_ERROR), e + 1) if i not in hidden)
+    # fastlane prints its update notice right after the failure: show what came before it.
+    for n in located.noise_starts:
+        if any(step.start <= n < step.stop for step in located.failed):
+            lead = range(max(0, n - LINES_BEFORE_NOISE), n)
+            shown.update(i for i in lead if i not in hidden)
 
     blocks: list[list[NumberedLine]] = []
     for i in sorted(shown):

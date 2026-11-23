@@ -2,6 +2,7 @@ import gzip
 from datetime import UTC, datetime
 from pathlib import Path
 
+import pytest
 from rich.console import Console
 
 from cidoc.labeling.display import (
@@ -10,11 +11,15 @@ from cidoc.labeling.display import (
     build_focus_view,
     build_view,
     clean_log,
+    fastlane_noise_blocks,
     hidden_action_lines,
+    is_marker,
     read_log,
     render_focus_view,
     split_steps,
+    visible_line_numbers,
 )
+from cidoc.labeling.hints import hint_for_log
 from cidoc.labeling.session import Candidate, ViewToggle, label_one
 
 TS = "2026-10-01T12:34:56.1234567Z "
@@ -243,3 +248,99 @@ def test_focus_view_reads_gzipped_stored_log(tmp_path: Path) -> None:
     path.write_bytes(gzip.compress(LOG.encode()))
 
     assert build_focus_view(read_log(path)).failed_titles == ["Run flutter build apk --release"]
+
+
+# --- Xcode / fastlane markers ---------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        '❌ error: Signing for "Runner" requires a development team.',
+        "** ARCHIVE FAILED **",
+        "** BUILD FAILED **",
+        '[!] CocoaPods could not find compatible versions for pod "Firebase/Auth"',
+        "[10:20:50]: fastlane finished with errors",
+        "[!] Error building the application - see the log above 💥",
+        "Error (Xcode): No profiles for 'com.example.app' were found",
+        'ERROR ITMS-90189: "Redundant Binary Upload."',
+    ],
+)
+def test_xcode_and_fastlane_error_markers(line: str) -> None:
+    assert is_marker(line)
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        'Target Integrity (Xcode): The file "Runner.xcconfig" couldn\'t be opened.',
+        "Warning (Xcode): Run script build phase 'Thin Binary' will be run during every build",
+        "Warning (Xcode): error: deprecated API used",  # error marker inside: still a warning
+    ],
+)
+def test_xcode_warnings_are_not_error_markers(line: str) -> None:
+    assert not is_marker(line)
+
+
+def fastlane_notice(version: str = "2.242.0", notes: int = 0) -> list[str]:
+    banner = "#" * 71
+    lines = [
+        banner,
+        f"# fastlane {version} is available. You are on 2.228.0.",
+        "# You should use the latest version.",
+        "# Please update using `bundle update fastlane`.",
+        banner,
+    ]
+    if notes:
+        lines += [f"* change {i}" for i in range(notes)]
+        lines += [
+            "To see all new releases, open https://github.com/fastlane/fastlane/releases",
+            "",
+            "Please update using `bundle update fastlane`",
+        ]
+    return lines
+
+
+def test_fastlane_notice_blocks_with_and_without_release_notes() -> None:
+    lines = ["a", *fastlane_notice(notes=5), "b", *fastlane_notice(), "c"]
+
+    blocks = fastlane_noise_blocks(lines, len(lines))
+
+    # First: banner (5) + notes (5) + 3 closing lines = indices 1..13. Second: banner only.
+    assert blocks == [(1, 14), (15, 20)]
+    assert lines[14] == "b" and lines[20] == "c"
+
+
+FASTLANE_LOG = log(
+    "##[group]Run bundle exec fastlane ios release",  # 1
+    "##[endgroup]",  # 2
+    *[f"build output {i}" for i in range(60)],  # 3-62
+    '[!] No signing certificate "iOS Distribution" found',  # 63
+    *[f"context {i}" for i in range(30)],  # 64-93
+    "[10:20:50]: fastlane finished with errors",  # 94
+    *fastlane_notice(notes=150),  # 95-252
+    "##[error]Process completed with exit code 1.",  # 253
+)
+
+
+def test_fastlane_notice_is_hidden_and_the_lines_above_it_shown() -> None:
+    view = build_focus_view(FASTLANE_LOG)
+    shown = {number for block in view.blocks for number, _ in block}
+    lines = clean_log(FASTLANE_LOG)
+    [(start, stop)] = fastlane_noise_blocks(lines, len(lines))
+
+    assert (start + 1, stop) == (95, 252)
+    assert not shown & set(range(95, 253))  # whole notice hidden, release notes included
+    assert set(range(55, 95)) <= shown  # the 40 lines above it
+    assert {63, 94, 253} <= shown  # the real error, fastlane's verdict, ##[error]
+
+
+def test_hints_skip_xcode_warnings_and_fastlane_notices() -> None:
+    warn = log(
+        "Warning (Xcode): xcodebuild: WARNING: Using the first of multiple matching destinations"
+    )
+    notice = log(*fastlane_notice(notes=3), "plain line")
+
+    assert hint_for_log(warn, build_focus_view(warn)) is None
+    # The notice mentions nothing a rule matches today; check it is not even searched.
+    assert visible_line_numbers(notice) == [len(clean_log(notice))]

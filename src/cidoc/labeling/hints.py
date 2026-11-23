@@ -14,7 +14,12 @@ import re
 from collections.abc import Iterable
 from dataclasses import dataclass
 
-from cidoc.labeling.display import CLEANUP_LINE, FocusView, clean_log
+from cidoc.labeling.display import (
+    NON_ERROR_MARKERS,
+    FocusView,
+    clean_log,
+    visible_line_numbers,
+)
 
 
 @dataclass(frozen=True)
@@ -99,6 +104,8 @@ def find_hint(lines: list[str], search: Iterable[int]) -> Hint | None:
         for n in numbers:
             if first_after is not None and n <= first_after:
                 continue
+            if any(marker in lines[n - 1] for marker in NON_ERROR_MARKERS):
+                continue  # e.g. "Warning (Xcode): ... xcodebuild ..." is not an ios_build cause
             match = rule.pattern.search(lines[n - 1])
             if match:
                 return Hint(rule.category, match.group(0)[:MAX_MATCH_CHARS], n)
@@ -106,11 +113,11 @@ def find_hint(lines: list[str], search: Iterable[int]) -> Hint | None:
 
 
 def hint_for_log(text: str, focus: FocusView) -> Hint | None:
-    """Hint from the focus view's lines, or the whole log before cleanup without one."""
+    """Hint from the focus view's lines, or, without one, every line before cleanup that
+    is not known noise (successful action blocks, fastlane update notices)."""
     lines = clean_log(text)
     if focus.empty:
-        end = next((i for i, line in enumerate(lines) if line.startswith(CLEANUP_LINE)), len(lines))
-        search: Iterable[int] = range(1, end + 1)
+        search: Iterable[int] = visible_line_numbers(text)
     else:
         search = (number for block in focus.blocks for number, _ in block)
     return find_hint(lines, search)
