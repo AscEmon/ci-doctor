@@ -21,6 +21,7 @@ from cidoc.labeling.display import (
     render_focus_view,
     render_view,
 )
+from cidoc.labeling.hints import Hint, hint_for_log
 from cidoc.labeling.labels import (
     CATEGORY_HINTS,
     CATEGORY_KEYS,
@@ -231,6 +232,13 @@ def ask_until_valid[T](console: Console, ask: Ask, prompt: str, parse: Callable[
             console.print(f"[red]{exc}[/red]")
 
 
+def render_hint(console: Console, hint: Hint) -> None:
+    # Text, not markup: the matched snippet is log content.
+    line = Text("hint: ", style="bold yellow")
+    line.append(f"{hint.category} (matched: {hint.matched!r} on L{hint.line_no})")
+    console.print(line, highlight=False)
+
+
 def parse_root_cause(text: str) -> str:
     one_line = " ".join(text.split())
     if not one_line:
@@ -246,12 +254,18 @@ def label_one(
     total_lines: int,
     now: datetime,
     views: ViewToggle | None = None,
+    hint: Hint | None = None,
 ) -> Label | None:
-    """Collect one label, or return None if skipped. Raises QuitRequestedError on quit."""
+    """Collect one label, or return None if skipped. Raises QuitRequestedError on quit.
+
+    The hint is only displayed: the category is always typed by the labeler.
+    """
     can_toggle = views is not None and views.can_toggle
     keys = [*CATEGORY_KEYS, SKIP_KEY, *([TOGGLE_VIEW_KEY] if can_toggle else [])]
     while True:
         render_menu(console, can_toggle)
+        if hint is not None:
+            render_hint(console, hint)
         key = read_key(console, getch, keys, "category>")
         if key != TOGGLE_VIEW_KEY or views is None:
             break
@@ -266,16 +280,19 @@ def label_one(
         lambda text: parse_evidence(text, total_lines),
     )
     confidence = read_key(console, getch, [str(n) for n in CONFIDENCE_LEVELS], "confidence 1-3>")
+    category = CATEGORY_KEYS[key]
     return Label(
         job_id=c.job_id,
         repo=c.repo,
         run_id=c.run_id,
-        category=CATEGORY_KEYS[key],
+        category=category,
         root_cause=root_cause,
         evidence_lines=evidence,
         confidence=int(confidence),
         log_path=c.log_path,
         labeled_at=now.isoformat(),
+        hint=hint.category if hint else None,
+        hint_accepted=(category == hint.category) if hint else None,
     )
 
 
@@ -297,11 +314,13 @@ def run_session(
             continue
         text = read_log(log_file)
         view = build_view(text)
-        views = ViewToggle(console, view, build_focus_view(text, c.failed_steps))
+        focus = build_focus_view(text, c.failed_steps)
+        views = ViewToggle(console, view, focus)
+        hint = hint_for_log(text, focus)
         render_header(console, c, index, len(picks))
         views.render()
         try:
-            label = label_one(console, getch, ask, c, view.total_lines, clock(), views)
+            label = label_one(console, getch, ask, c, view.total_lines, clock(), views, hint)
         except QuitRequestedError:
             result.quit = True
             break

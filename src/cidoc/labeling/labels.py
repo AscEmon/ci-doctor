@@ -45,6 +45,10 @@ class Label:
     confidence: int
     log_path: str
     labeled_at: str
+    hint: str | None = None
+    """Category the rule-based hint suggested, or None if there was no hint."""
+    hint_accepted: bool | None = None
+    """Whether `category` equals `hint`; None when there was no hint."""
 
 
 def load_labels(path: Path, on_bad_line: Callable[[int], None] | None = None) -> list[Label]:
