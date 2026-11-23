@@ -64,6 +64,35 @@ class QuitRequestedError(Exception):
     """The labeler asked to stop; nothing partial is written."""
 
 
+_CANDIDATE_COLUMNS = (
+    "job_id, repo, run_id, workflow_name, workflow_path, event, head_branch,"
+    " failed_steps, runner_os, log_path"
+)
+
+
+def _candidate(row: sqlite3.Row) -> Candidate:
+    return Candidate(
+        job_id=row["job_id"],
+        repo=row["repo"],
+        run_id=row["run_id"],
+        workflow_name=row["workflow_name"],
+        workflow_path=row["workflow_path"],
+        event=row["event"],
+        head_branch=row["head_branch"],
+        failed_steps=json.loads(row["failed_steps"]),
+        runner_os=row["runner_os"],
+        log_path=row["log_path"],
+    )
+
+
+def load_candidate(conn: sqlite3.Connection, job_id: int) -> Candidate | None:
+    row = conn.execute(
+        f"SELECT {_CANDIDATE_COLUMNS} FROM failures WHERE job_id = ?",  # noqa: S608 - constant
+        (job_id,),
+    ).fetchone()
+    return _candidate(row) if row else None
+
+
 def load_candidates(
     conn: sqlite3.Connection, exclude: set[int], include_over_redacted: bool = False
 ) -> list[Candidate]:
@@ -73,27 +102,11 @@ def load_candidates(
     refetched; they are left out unless `include_over_redacted` is set.
     """
     rows = conn.execute(
-        "SELECT job_id, repo, run_id, workflow_name, workflow_path, event, head_branch,"
-        " failed_steps, runner_os, log_path FROM failures"
+        f"SELECT {_CANDIDATE_COLUMNS} FROM failures"  # noqa: S608 - constant columns
         " WHERE over_redacted = 0 OR ? ORDER BY job_id",
         (include_over_redacted,),
     )
-    return [
-        Candidate(
-            job_id=row["job_id"],
-            repo=row["repo"],
-            run_id=row["run_id"],
-            workflow_name=row["workflow_name"],
-            workflow_path=row["workflow_path"],
-            event=row["event"],
-            head_branch=row["head_branch"],
-            failed_steps=json.loads(row["failed_steps"]),
-            runner_os=row["runner_os"],
-            log_path=row["log_path"],
-        )
-        for row in rows
-        if row["job_id"] not in exclude
-    ]
+    return [_candidate(row) for row in rows if row["job_id"] not in exclude]
 
 
 def count_unlabeled_over_redacted(conn: sqlite3.Connection, exclude: set[int]) -> int:
@@ -294,6 +307,64 @@ def label_one(
         hint=hint.category if hint else None,
         hint_accepted=(category == hint.category) if hint else None,
     )
+
+
+KEEP_KEYS = frozenset({"\r", "\n"})
+
+
+def keep_or[V](parse: Callable[[str], V], current: V) -> Callable[[str], V]:
+    """A parser where an empty answer means 'keep the current value'."""
+    return lambda text: current if not text.strip() else parse(text)
+
+
+def edit_one(
+    console: Console,
+    getch: Getch,
+    ask: Ask,
+    current: Label,
+    total_lines: int,
+    views: ViewToggle | None = None,
+) -> dict[str, object]:
+    """Ask for each editable field with the current value pre-filled; Enter keeps it.
+
+    Returns only the editable fields (category, root_cause, evidence_lines, confidence).
+    Raises QuitRequestedError on quit, in which case nothing is changed.
+    """
+    can_toggle = views is not None and views.can_toggle
+    keys = [*CATEGORY_KEYS, *KEEP_KEYS, *([TOGGLE_VIEW_KEY] if can_toggle else [])]
+    while True:
+        render_menu(console, can_toggle)
+        key = read_key(console, getch, keys, f"category [{current.category}]>")
+        if key != TOGGLE_VIEW_KEY or views is None:
+            break
+        views.toggle()
+    category = current.category if key in KEEP_KEYS else CATEGORY_KEYS[key]
+
+    root_cause = ask_until_valid(
+        console,
+        ask,
+        f"root cause [{current.root_cause}]> ",
+        keep_or(parse_root_cause, current.root_cause),
+    )
+    shown = ",".join(map(str, current.evidence_lines))
+    evidence = ask_until_valid(
+        console,
+        ask,
+        f"evidence line numbers [{shown}] (1-{total_lines})> ",
+        keep_or(lambda text: parse_evidence(text, total_lines), current.evidence_lines),
+    )
+    confidence = read_key(
+        console,
+        getch,
+        [*(str(n) for n in CONFIDENCE_LEVELS), *KEEP_KEYS],
+        f"confidence 1-3 [{current.confidence}]>",
+    )
+    return {
+        "category": category,
+        "root_cause": root_cause,
+        "evidence_lines": evidence,
+        "confidence": current.confidence if confidence in KEEP_KEYS else int(confidence),
+    }
 
 
 def run_session(

@@ -15,12 +15,25 @@ from rich.text import Text
 from cidoc.config import get_settings
 from cidoc.db import DB_FILENAME, connect
 from cidoc.github_client import GitHubClient
-from cidoc.labeling.labels import LABELS_FILENAME, load_labels
+from cidoc.labeling.display import build_focus_view, build_view, read_log
+from cidoc.labeling.labels import (
+    LABELS_FILENAME,
+    LabelNotFoundError,
+    find_label,
+    load_labels,
+    replace_label_line,
+)
 from cidoc.labeling.session import (
+    Candidate,
+    QuitRequestedError,
+    ViewToggle,
     cap_per_run,
     count_unlabeled_over_redacted,
+    edit_one,
+    load_candidate,
     load_candidates,
     pick_stratified,
+    render_header,
     run_session,
 )
 from cidoc.miner.discover import RepoInfo, discover
@@ -441,8 +454,16 @@ def mine_stats(
         console.print(dups)
 
 
-@app.command("label")
+label_app = typer.Typer(
+    help="Label failures by hand (run without a subcommand to start a session).",
+    invoke_without_command=True,
+)
+app.add_typer(label_app, name="label")
+
+
+@label_app.callback()
 def label(
+    ctx: typer.Context,
     n: Annotated[int, typer.Option("--n", help="How many failures to label this session.")] = 50,
     seed: Annotated[int | None, typer.Option(help="Random seed for a reproducible pick.")] = None,
     max_per_run: Annotated[
@@ -461,6 +482,8 @@ def label(
     ] = False,
 ) -> None:
     """Label unlabeled failures by hand; answers are appended to labels.jsonl."""
+    if ctx.invoked_subcommand is not None:
+        return
     data_dir = get_settings().data_dir
     labels_path = data_dir / LABELS_FILENAME
 
@@ -510,3 +533,70 @@ def label(
         f"{status}: {result.labeled} labeled, {result.skipped} skipped "
         f"({len(existing) + result.labeled} total in {labels_path}). Run again to resume."
     )
+
+
+@label_app.command("edit")
+def label_edit(
+    job_id: Annotated[int | None, typer.Argument(help="Job id of the label to edit.")] = None,
+    last: Annotated[
+        bool, typer.Option("--last", help="Edit the most recently written label.")
+    ] = False,
+) -> None:
+    """Change a label's category, root cause, evidence or confidence (Enter keeps each)."""
+    if (job_id is None) == (not last):
+        console.print("[red]Give a job id or --last (not both).[/red]")
+        raise typer.Exit(2)
+    data_dir = get_settings().data_dir
+    labels_path = data_dir / LABELS_FILENAME
+    try:
+        stored = find_label(labels_path, None if last else job_id)
+    except LabelNotFoundError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1) from None
+    current = stored.label
+
+    log_file = data_dir / current.log_path
+    if not log_file.exists():
+        console.print(f"[red]log missing:[/red] {log_file}; cannot show or check evidence lines.")
+        raise typer.Exit(1)
+    conn = open_db()
+    try:
+        candidate = load_candidate(conn, current.job_id)
+    finally:
+        conn.close()
+    if candidate is None:  # pruned from the DB; the label and log still exist
+        candidate = Candidate(
+            job_id=current.job_id,
+            repo=current.repo,
+            run_id=current.run_id,
+            workflow_name="?",
+            workflow_path="?",
+            event="?",
+            head_branch=None,
+            failed_steps=[],
+            runner_os=None,
+            log_path=current.log_path,
+        )
+
+    text = read_log(log_file)
+    full = build_view(text)
+    views = ViewToggle(console, full, build_focus_view(text, candidate.failed_steps))
+    render_header(console, candidate, 1, 1)
+    views.render()
+    console.print(
+        f"[bold]Editing label for job {current.job_id}[/bold]"
+        f" (labeled {current.labeled_at}). Enter keeps the current value."
+    )
+    try:
+        changes = edit_one(console, typer.getchar, console.input, current, full.total_lines, views)
+    except QuitRequestedError:
+        console.print("[yellow]Quit: label unchanged.[/yellow]")
+        raise typer.Exit(0) from None
+
+    changed = [k for k, v in changes.items() if stored.record.get(k) != v]
+    if not changed:
+        console.print("No changes; label unchanged.")
+        return
+    record = {**stored.record, **changes, "edited_at": datetime.now(UTC).isoformat()}
+    replace_label_line(labels_path, stored.line_index, record)
+    console.print(f"Saved: changed {', '.join(changed)} for job {current.job_id}.")
