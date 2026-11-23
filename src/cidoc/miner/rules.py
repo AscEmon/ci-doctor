@@ -34,8 +34,99 @@ def workflow_skip_reason(path: str, name: str) -> str | None:
     return None
 
 
+# Runs triggered by issue activity are issue bots (triage, project boards), never builds.
+ISSUE_BOT_EVENTS = frozenset({"issues", "issue_comment"})
+
+
+def event_skip_reason(event: str) -> str | None:
+    if event in ISSUE_BOT_EVENTS:
+        return f"issue bot ({event} event)"
+    return None
+
+
 def run_skip_reason(run: dict[str, Any]) -> str | None:
-    return workflow_skip_reason(run.get("path") or "", run.get("name") or "")
+    return event_skip_reason(run.get("event") or "") or workflow_skip_reason(
+        run.get("path") or "", run.get("name") or ""
+    )
+
+
+# --- Job-level scope: PR hygiene, issue bots, aggregators -----------------------------
+#
+# These jobs fail by design (a PR title doesn't match a convention, a required job
+# failed elsewhere) and say nothing about building the app.
+
+# Actions whose failure is the whole job's purpose. "*/name" matches any owner (forks
+# and re-publications of the same action are common).
+OUT_OF_SCOPE_ACTIONS: dict[str, str] = {
+    "amannn/action-semantic-pull-request": "PR hygiene",
+    "actions/labeler": "PR hygiene",
+    "actions/stale": "PR hygiene",
+    "actions/first-interaction": "PR hygiene",
+    "*/release-drafter": "PR hygiene",
+    "*/pr-size-labeler": "PR hygiene",
+    "actions/add-to-project": "issue bot",
+    "re-actors/alls-green": "aggregator",
+}
+# 'Run owner/name@ref' as a step title (API step name or log step header). Sub-paths
+# like owner/name/sub@ref count as owner/name.
+_ACTION_STEP = re.compile(r"^(?:##\[group\])?Run ([\w.-]+)/([\w.-]+)(?:/[^@\s]*)?@", re.MULTILINE)
+PR_HYGIENE_JOB_NAME = re.compile(
+    r"\bpr[ _-]?title\b|^label(?:er|[ _-]?prs?)$|^welcome$", re.IGNORECASE
+)
+AGGREGATOR_JOB_NAME = re.compile(
+    r"^(?:ci[ _-]?success|all[ _-]?green|gate|results?|checks?)$", re.IGNORECASE
+)
+# What an aggregator's failing step shows. GitHub substitutes ${{ needs... }} before
+# logging, so the usual trace is the job's NEEDS (or similar) env printed as JSON.
+_NEEDS_EVIDENCE = re.compile(
+    r"^\s*[A-Z0-9_]*NEEDS[A-Z0-9_]*:\s*\{|toJSON\(needs\)|\bneeds\.[\w*-]+\.result\b",
+    re.MULTILINE,
+)
+# Steps every job has; they don't count when judging how much a job does.
+_BOILERPLATE_STEP = re.compile(r"^(?:set up job|complete job|post .*)$", re.IGNORECASE)
+# An aggregator by name runs at most a checkout and the one check step.
+AGGREGATOR_MAX_REAL_STEPS = 2
+
+
+@dataclass(frozen=True)
+class JobFacts:
+    """What is known about a failed job. Empty / None fields mean 'not known'."""
+
+    job_name: str = ""
+    failed_steps: tuple[str, ...] = ()
+    step_names: tuple[str, ...] = ()
+    """All step names of the job; empty when unknown (rows mined before they were kept)."""
+    failed_step_text: str | None = None
+    """The failed step(s)' log lines; None before the log is downloaded."""
+
+
+def action_skip_reason(text: str) -> str | None:
+    """Reason if `text` holds a 'Run owner/name@ref' step for an out-of-scope action."""
+    for owner, name in _ACTION_STEP.findall(text):
+        ref = f"{owner}/{name}".lower()
+        reason = OUT_OF_SCOPE_ACTIONS.get(ref) or OUT_OF_SCOPE_ACTIONS.get(f"*/{name.lower()}")
+        if reason:
+            return f"{reason} ({ref})"
+    return None
+
+
+def job_skip_reason(facts: JobFacts) -> str | None:
+    """Why a failed job is out of scope, or None to keep it."""
+    name = facts.job_name.strip()
+    if PR_HYGIENE_JOB_NAME.search(name):
+        return f"PR hygiene (job '{name}')"
+    for text in (*facts.failed_steps, facts.failed_step_text or ""):
+        reason = action_skip_reason(text)
+        if reason:
+            return reason
+    if len(facts.failed_steps) != 1:
+        return None  # an aggregator fails in exactly one step
+    if facts.failed_step_text and _NEEDS_EVIDENCE.search(facts.failed_step_text):
+        return "aggregator (reads needs results)"
+    real_steps = [s for s in facts.step_names if not _BOILERPLATE_STEP.match(s.strip())]
+    if AGGREGATOR_JOB_NAME.match(name) and 0 < len(real_steps) <= AGGREGATOR_MAX_REAL_STEPS:
+        return f"aggregator (job '{name}')"
+    return None
 
 
 def is_fork_run(run: dict[str, Any], repo: str) -> bool:

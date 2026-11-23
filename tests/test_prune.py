@@ -1,6 +1,8 @@
+import gzip
 import json
 import sqlite3
 from collections.abc import Iterator
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -58,7 +60,7 @@ def populate(conn: sqlite3.Connection, data_dir: Path) -> None:
         insert_failure(conn, job)
         log = data_dir / job.log_path
         log.parent.mkdir(parents=True, exist_ok=True)
-        log.write_bytes(b"gz")
+        log.write_bytes(gzip.compress(b"error: boom\n"))
     mark_run_mined(conn, "flutter/flutter", 2, NOW)
     mark_run_mined(conn, "o/app", 1, NOW)
 
@@ -218,3 +220,50 @@ def test_cli_prune_apply_deletes_and_warns_about_labels(cli_env: Path) -> None:
 
     again = CliRunner().invoke(app, ["mine", "prune"], terminal_width=200)
     assert "Nothing to prune." in again.output
+
+
+# --- Out-of-scope jobs (event, action, aggregator) ---------------------------------------
+
+SEMANTIC_PR_LOG = (
+    "##[group]Run amannn/action-semantic-pull-request@v5\n"
+    "##[endgroup]\n"
+    "No release type found in pull request title\n"
+    "##[error]No release type found in pull request title\n"
+)
+
+
+def add_failure(
+    conn: sqlite3.Connection,
+    data_dir: Path,
+    job_id: int,
+    log: bytes,
+    event: str = "push",
+    failed_steps: list[str] | None = None,
+) -> None:
+    job = replace(failure(job_id, "o/app"), event=event, failed_steps=failed_steps or ["Check"])
+    insert_failure(conn, job)
+    path = data_dir / job.log_path
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(log)
+
+
+def test_prune_removes_out_of_scope_jobs(conn: sqlite3.Connection, tmp_path: Path) -> None:
+    add_failure(conn, tmp_path, 41, gzip.compress(b"x\n"), event="issue_comment")
+    add_failure(conn, tmp_path, 42, gzip.compress(SEMANTIC_PR_LOG.encode()))
+    add_failure(conn, tmp_path, 43, b"not a gzip file")
+
+    plan = plan_prune(conn, EXCLUDES, tmp_path)
+
+    reasons = {f.job_id: f.reason for f in plan.failures}
+    assert reasons[41] == "issue bot (issue_comment event)"
+    assert reasons[42] == "PR hygiene (amannn/action-semantic-pull-request)"
+    assert 43 not in reasons  # unreadable log: kept, no crash
+    assert 11 not in reasons and 12 not in reasons  # ordinary build failures kept
+
+
+def test_log_rules_need_data_dir(conn: sqlite3.Connection, tmp_path: Path) -> None:
+    add_failure(conn, tmp_path, 42, gzip.compress(SEMANTIC_PR_LOG.encode()))
+
+    without_logs = {f.job_id for f in plan_prune(conn, EXCLUDES).failures}
+
+    assert 42 not in without_logs

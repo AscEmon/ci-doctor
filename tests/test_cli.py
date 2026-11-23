@@ -34,7 +34,7 @@ def test_mine_runs_prints_skipped_run_count(
     get_settings.cache_clear()
     results = {"acme/ok": MineResult(stored=2, skipped_runs=0), "acme/bad": MineResult(1, 3)}
     monkeypatch.setattr(cli, "open_github", lambda: nullcontext())
-    monkeypatch.setattr(cli, "mine_repo", lambda _c, _db, _d, name, *_a: results[name])
+    monkeypatch.setattr(cli, "mine_repo", lambda _c, _db, _d, name, *_a, **_k: results[name])
 
     result = runner.invoke(
         app, ["mine", "runs", "--repo", "acme/ok", "--repo", "acme/bad"], terminal_width=200
@@ -59,7 +59,9 @@ def test_mine_runs_skips_excluded_repos(monkeypatch: pytest.MonkeyPatch, tmp_pat
     get_settings.cache_clear()
     mined: list[str] = []
 
-    def fake_mine_repo(_c: object, _db: object, _d: object, name: str, *_a: object) -> MineResult:
+    def fake_mine_repo(
+        _c: object, _db: object, _d: object, name: str, *_a: object, **_k: object
+    ) -> MineResult:
         mined.append(name)
         return MineResult(stored=0, skipped_runs=0)
 

@@ -6,7 +6,7 @@ import logging
 import os
 import sqlite3
 from collections.abc import Callable, Iterator, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -14,8 +14,9 @@ from typing import Any
 import httpx
 
 from cidoc.github_client import GitHubClient
+from cidoc.labeling.display import failed_step_lines
 from cidoc.miner.fixpair import FixPairFinder
-from cidoc.miner.rules import is_fork_run, run_skip_reason
+from cidoc.miner.rules import JobFacts, is_fork_run, job_skip_reason, run_skip_reason
 from cidoc.redact import REDACTOR_VERSION, Redaction, redact
 
 logger = logging.getLogger(__name__)
@@ -54,6 +55,9 @@ class FailedJob:
     redactions: int
     redaction_counts: dict[str, int] = field(default_factory=dict)
     """Redactions per rule; sums to `redactions`."""
+    job_name: str = ""
+    step_names: list[str] = field(default_factory=list)
+    """Every step of the job, in order (not just the failed ones)."""
 
 
 @dataclass(frozen=True)
@@ -146,11 +150,16 @@ def redact_log(raw: bytes) -> Redaction:
 
 
 def store_log(data_dir: Path, relpath: Path, raw: bytes) -> tuple[int, dict[str, int]]:
-    """Redact and gzip a log under `data_dir`. Returns (uncompressed bytes, counts per rule).
+    """Redact and gzip a log under `data_dir`. Returns (uncompressed bytes, counts per rule)."""
+    result = redact_log(raw)
+    return write_redacted_log(data_dir, relpath, result), dict(result.counts)
+
+
+def write_redacted_log(data_dir: Path, relpath: Path, result: Redaction) -> int:
+    """Gzip an already-redacted log under `data_dir`. Returns its uncompressed size.
 
     Writes to a temp file and renames, so an interrupted run never leaves a half-written log.
     """
-    result = redact_log(raw)
     payload = result.text.encode("utf-8")
     dest = data_dir / relpath
     dest.parent.mkdir(parents=True, exist_ok=True)
@@ -158,7 +167,7 @@ def store_log(data_dir: Path, relpath: Path, raw: bytes) -> tuple[int, dict[str,
     with gzip.open(tmp, "wb") as fh:
         fh.write(payload)
     os.replace(tmp, dest)
-    return len(payload), dict(result.counts)
+    return len(payload)
 
 
 def insert_failure(conn: sqlite3.Connection, job: FailedJob) -> None:
@@ -166,8 +175,8 @@ def insert_failure(conn: sqlite3.Connection, job: FailedJob) -> None:
         conn.execute(
             "INSERT INTO failures (job_id, repo, run_id, workflow_name, workflow_path, event,"
             " head_branch, head_sha, fix_sha, failed_steps, runner_os, created_at, log_path,"
-            " log_bytes, redactions, redaction_counts, redactor_version)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            " log_bytes, redactions, redaction_counts, redactor_version, job_name, step_names)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 job.job_id,
                 job.repo,
@@ -186,6 +195,8 @@ def insert_failure(conn: sqlite3.Connection, job: FailedJob) -> None:
                 job.redactions,
                 json.dumps(job.redaction_counts, sort_keys=True),
                 REDACTOR_VERSION,
+                job.job_name,
+                json.dumps(job.step_names),
             ),
         )
 
@@ -215,12 +226,14 @@ def mine_repo(
     now: datetime,
     max_runs: int,
     on_job: Callable[[FailedJob | None, int], None] | None = None,
+    on_excluded: Callable[[int, str], None] | None = None,
 ) -> MineResult:
     """Store every failed job from up to `max_runs` recent failed runs.
 
     Safe to re-run after an interruption: finished runs and stored jobs are skipped, and
     already-mined runs still count toward `max_runs` so the cap is per repo, not per call.
     `on_job` is called with the stored job, or None and the job id when its log is gone.
+    `on_excluded` is called with the job id and reason for out-of-scope jobs.
 
     An unexpected error inside one run is logged and that run is skipped, so one bad run
     can't abort the repo. KeyboardInterrupt is not an Exception and still stops mining.
@@ -235,7 +248,9 @@ def mine_repo(
         if run["id"] in done_runs:
             continue
         try:
-            stored += _mine_run(client, conn, data_dir, repo, run, fixes, done_jobs, on_job)
+            stored += _mine_run(
+                client, conn, data_dir, repo, run, fixes, done_jobs, on_job, on_excluded
+            )
         except Exception as exc:
             # Only the type: messages can be long, and the run is retried on the next pass.
             logger.warning("run skipped: %s run %s: %s", repo, run["id"], type(exc).__name__)
@@ -254,19 +269,44 @@ def _mine_run(
     fixes: FixPairFinder,
     done_jobs: set[int],
     on_job: Callable[[FailedJob | None, int], None] | None,
+    on_excluded: Callable[[int, str], None] | None,
 ) -> int:
-    """Store the failed jobs of one run. Returns jobs stored."""
+    """Store the failed jobs of one run. Returns jobs stored.
+
+    Out-of-scope jobs (rules.job_skip_reason) are dropped as early as the facts allow:
+    by name and failed step names before the log is downloaded, by the failed step's
+    log lines before anything is written.
+    """
     stored = 0
     for job in list_failed_jobs(client, repo, run["id"]):
         if job["id"] in done_jobs:
+            continue
+        facts = JobFacts(
+            job_name=job.get("name") or "",
+            failed_steps=tuple(failed_step_names(job)),
+            step_names=tuple(s["name"] for s in job.get("steps") or []),
+        )
+        # Cheap facts first: no log download for jobs out of scope by name or step.
+        reason = job_skip_reason(facts)
+        if reason is not None:
+            if on_excluded:
+                on_excluded(job["id"], reason)
             continue
         raw = download_job_log(client, repo, job["id"])
         if raw is None:
             if on_job:
                 on_job(None, job["id"])
             continue
+        redacted = redact_log(raw)
+        step_text = "\n".join(failed_step_lines(redacted.text, facts.failed_steps))
+        reason = job_skip_reason(replace(facts, failed_step_text=step_text))
+        if reason is not None:  # e.g. an aggregator, recognisable only from its log
+            if on_excluded:
+                on_excluded(job["id"], reason)
+            continue
         relpath = log_relpath(repo, job["id"])
-        log_bytes, redaction_counts = store_log(data_dir, relpath, raw)
+        log_bytes = write_redacted_log(data_dir, relpath, redacted)
+        redaction_counts = dict(redacted.counts)
         failure = FailedJob(
             job_id=job["id"],
             repo=repo,
@@ -279,13 +319,15 @@ def _mine_run(
             # Cached per (workflow, branch), so this costs at most one lookup per branch.
             # Fork branches can't be paired with the base repo's runs; skip the lookup.
             fix_sha=None if is_fork_run(run, repo) else fixes.fix_sha(run),
-            failed_steps=failed_step_names(job),
+            failed_steps=list(facts.failed_steps),
             runner_os=runner_os_from_labels(job.get("labels") or []),
             created_at=run["created_at"],
             log_path=relpath.as_posix(),
             log_bytes=log_bytes,
             redactions=sum(redaction_counts.values()),
             redaction_counts=redaction_counts,
+            job_name=facts.job_name,
+            step_names=list(facts.step_names),
         )
         insert_failure(conn, failure)
         stored += 1

@@ -42,6 +42,8 @@ def test_connect_creates_db_and_schema(tmp_path: Path) -> None:
         "redaction_counts",
         "redactor_version",
         "over_redacted",
+        "job_name",
+        "step_names",
     ]
     conn.close()
 

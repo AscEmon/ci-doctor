@@ -64,6 +64,12 @@ MIGRATIONS: tuple[str, ...] = (
     -- refetched (GitHub no longer has it).
     ALTER TABLE failures ADD COLUMN over_redacted INTEGER NOT NULL DEFAULT 0;
     """,
+    """
+    -- The job's name and all its step names (JSON array), for job-level scope rules.
+    -- Rows mined before this are '' / '[]': unknown, so name-based rules skip them.
+    ALTER TABLE failures ADD COLUMN job_name TEXT NOT NULL DEFAULT '';
+    ALTER TABLE failures ADD COLUMN step_names TEXT NOT NULL DEFAULT '[]';
+    """,
 )
 
 

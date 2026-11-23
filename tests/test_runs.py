@@ -372,3 +372,89 @@ def test_mined_runs_count_toward_per_repo_cap(conn: sqlite3.Connection, tmp_path
         assert mine_repo(client, conn, tmp_path, REPO, NOW, max_runs=3).stored == 1
 
     assert stored_jobs(conn) == [1001, 2001, 3001]
+
+
+# --- Out-of-scope jobs during mining ----------------------------------------------------
+
+
+def named_job(job_id: int, name: str, failed_step: str = "Run flutter build apk") -> dict[str, Any]:
+    return {
+        **job(job_id),
+        "name": name,
+        "steps": [
+            {"name": "Set up job", "conclusion": "success"},
+            {"name": "Run actions/checkout@v4", "conclusion": "success"},
+            {"name": failed_step, "conclusion": "failure"},
+            {"name": "Complete job", "conclusion": "success"},
+        ],
+    }
+
+
+AGGREGATOR_LOG = (
+    b"2026-10-20T10:00:00Z ##[group]Run node .github/scripts/ci/check.mjs result\n"
+    b"2026-10-20T10:00:00Z env:\n"
+    b"2026-10-20T10:00:00Z   NEEDS: {\n"
+    b'2026-10-20T10:00:00Z   "build": {"result": "failure"}\n'
+    b"2026-10-20T10:00:00Z }\n"
+    b"2026-10-20T10:00:00Z ##[endgroup]\n"
+    b"2026-10-20T10:00:01Z ##[error]Process completed with exit code 1.\n"
+)
+
+
+def test_out_of_scope_jobs_are_not_stored(conn: sqlite3.Connection, tmp_path: Path) -> None:
+    seen: list[str] = []
+    jobs = {
+        100: [
+            named_job(1001, "Validate PR title"),
+            named_job(1002, "ci", "Run node .github/scripts/ci/check.mjs result"),
+            named_job(1003, "build (android)"),
+        ]
+    }
+    client = make_client(
+        runs=[run(100)], jobs=jobs, logs={1002: AGGREGATOR_LOG, 1003: b"BUILD FAILED\n"}, seen=seen
+    )
+    excluded: list[tuple[int, str]] = []
+
+    with client:
+        result = mine_repo(
+            client,
+            conn,
+            tmp_path,
+            REPO,
+            NOW,
+            max_runs=30,
+            on_excluded=lambda job_id, reason: excluded.append((job_id, reason)),
+        )
+
+    assert result.stored == 1
+    assert excluded == [
+        (1001, "PR hygiene (job 'Validate PR title')"),
+        (1002, "aggregator (reads needs results)"),
+    ]
+    # Excluded by name: never downloaded. Excluded by log: downloaded, never written.
+    assert f"/repos/{REPO}/actions/jobs/1001/logs" not in seen
+    assert f"/repos/{REPO}/actions/jobs/1002/logs" in seen
+    assert not (tmp_path / log_relpath(REPO, 1002)).exists()
+    row = conn.execute("SELECT job_id, job_name, step_names FROM failures").fetchone()
+    assert (row["job_id"], row["job_name"]) == (1003, "build (android)")
+    assert json.loads(row["step_names"]) == [
+        "Set up job",
+        "Run actions/checkout@v4",
+        "Run flutter build apk",
+        "Complete job",
+    ]
+    # The run is still finished: a rerun does not revisit the excluded jobs.
+    assert [r[0] for r in conn.execute("SELECT run_id FROM mined_runs")] == [100]
+
+
+@pytest.mark.parametrize("event", ["issues", "issue_comment"])
+def test_issue_bot_runs_are_skipped_before_any_job_call(
+    conn: sqlite3.Connection, tmp_path: Path, event: str
+) -> None:
+    seen: list[str] = []
+    client = make_client(runs=[run(100, event=event)], jobs={}, logs={}, seen=seen)
+
+    with client:
+        assert mine_repo(client, conn, tmp_path, REPO, NOW, max_runs=30).stored == 0
+
+    assert seen == [f"/repos/{REPO}/actions/runs"]

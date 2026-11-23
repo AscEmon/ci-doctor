@@ -164,6 +164,9 @@ def mine_runs(
     excludes = load_excludes()
     now = datetime.now(UTC)
 
+    def report_excluded_job(job_id: int, reason: str) -> None:
+        console.print(f"  [dim]out of scope[/dim] job {job_id}: {reason}")
+
     def report(job: FailedJob | None, job_id: int) -> None:
         if job is None:
             console.print(f"  [yellow]log expired[/yellow] job {job_id}")
@@ -181,7 +184,16 @@ def mine_runs(
                     report_excluded(name, reason)
                     continue
                 console.print(f"[bold]{name}[/bold]")
-                result = mine_repo(client, conn, data_dir, name, now, max_per_repo, report)
+                result = mine_repo(
+                    client,
+                    conn,
+                    data_dir,
+                    name,
+                    now,
+                    max_per_repo,
+                    report,
+                    on_excluded=report_excluded_job,
+                )
                 console.print(f"  stored {result.stored} new failed jobs")
                 if result.skipped_runs:
                     console.print(
@@ -206,7 +218,7 @@ def mine_prune(
     excludes = load_excludes()
     conn = open_db()
     try:
-        plan = plan_prune(conn, excludes)
+        plan = plan_prune(conn, excludes, data_dir)
         if plan.empty:
             console.print("Nothing to prune.")
             return

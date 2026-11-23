@@ -232,23 +232,57 @@ class FocusView:
         return not self.blocks
 
 
+@dataclass(frozen=True)
+class _LogSteps:
+    lines: list[str]
+    end: int
+    """Index of 'Post job cleanup.' (or len(lines)): nothing from here on is considered."""
+    hidden: set[int]
+    errors: list[int]
+    failed: list[Step]
+
+
+def _locate_failed_steps(text: str, failed_steps: Iterable[str]) -> _LogSteps:
+    """Steps that contain an ##[error] or match a failed step name from the API."""
+    lines = clean_log(text)
+    end = next((i for i, line in enumerate(lines) if line.startswith(CLEANUP_LINE)), len(lines))
+    hidden = hidden_action_lines(lines, end)
+    errors = [i for i in range(end) if lines[i].startswith(ERROR_PREFIX) and i not in hidden]
+    names = list(failed_steps)
+    failed = [
+        step
+        for step in split_steps(lines, end)
+        if any(step.start <= e < step.stop for e in errors) or _matches_failed_step(step, names)
+    ]
+    return _LogSteps(lines, end, hidden, errors, failed)
+
+
+def failed_step_lines(text: str, failed_steps: Iterable[str] = ()) -> list[str]:
+    """All visible lines of the failed step(s), uncondensed, in log order.
+
+    For rules that need to read what the failing step ran (its header, env and output).
+    Empty when no failed step can be located.
+    """
+    located = _locate_failed_steps(text, failed_steps)
+    return [
+        located.lines[i]
+        for step in located.failed
+        for i in range(step.start, step.stop)
+        if i not in located.hidden
+    ]
+
+
 def build_focus_view(text: str, failed_steps: Iterable[str] = ()) -> FocusView:
     """Only the failed step(s), condensed if long, plus the lines leading up to each error.
 
     Line numbers stay those of the stored log, so they can be cited as evidence.
     """
-    lines = clean_log(text)
-    end = next((i for i, line in enumerate(lines) if line.startswith(CLEANUP_LINE)), len(lines))
-    hidden = hidden_action_lines(lines, end)
-    errors = [i for i in range(end) if lines[i].startswith(ERROR_PREFIX) and i not in hidden]
-    failed_steps = list(failed_steps)
+    located = _locate_failed_steps(text, failed_steps)
+    lines, end, hidden, errors = located.lines, located.end, located.hidden, located.errors
 
     shown: set[int] = set()
     titles: list[str] = []
-    for step in split_steps(lines, end):
-        has_error = any(step.start <= e < step.stop for e in errors)
-        if not has_error and not _matches_failed_step(step, failed_steps):
-            continue
+    for step in located.failed:
         titles.append(step.title)
         visible = [i for i in range(step.start, step.stop) if i not in hidden]
         if len(visible) <= FULL_STEP_MAX_LINES:
