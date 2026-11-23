@@ -33,6 +33,13 @@
    uv run cidoc --help
    ```
 
+## Labeling
+
+Label failed jobs by hand with `uv run cidoc label`, and fix a label with
+`uv run cidoc label edit <job_id>` (or `--last`). Follow the
+[labeling guideline](docs/LABELING_GUIDELINE.md) for how to read a log, what each
+category means, and the tie-break rules.
+
 ## Development checks
 
 ```sh
