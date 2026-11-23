@@ -10,7 +10,8 @@ import json
 import random
 import sqlite3
 from collections import Counter, defaultdict
-from dataclasses import dataclass
+from collections.abc import Iterable, Iterator
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from cidoc.labeling.display import clean_log, read_log
@@ -56,42 +57,46 @@ def snippet_around(line: str, start: int, end: int, context: int) -> str:
     return redact(text).text
 
 
-def collect_redaction_report(
-    conn: sqlite3.Connection,
-    data_dir: Path,
+@dataclass(frozen=True)
+class LogText:
+    """One redacted log to report on."""
+
+    job_id: int
+    repo: str
+    text: str
+    counts: dict[str, int] | None
+    """Per-rule counts if known ({} for none); None to count the masks in `text` instead."""
+
+
+def build_redaction_report(
+    logs: Iterable[LogText],
     rng: random.Random,
     examples_per_rule: int = EXAMPLES_PER_RULE,
     context: int = CONTEXT_CHARS,
 ) -> RedactionReport:
+    """Per-rule counts and sampled masked examples for already-redacted log texts."""
     counts: Counter[str] = Counter()
     logs_per_rule: Counter[str] = Counter()
     found: defaultdict[str, list[Example]] = defaultdict(list)
     from_markers = 0
-    missing: list[int] = []
+    with_redactions = 0
 
-    rows = conn.execute(
-        "SELECT job_id, repo, log_path, redaction_counts FROM failures"
-        " WHERE redactions > 0 ORDER BY job_id"
-    ).fetchall()
-    for row in rows:
-        path = data_dir / row["log_path"]
-        if not path.exists():
-            missing.append(row["job_id"])
-            continue
-        text = read_log(path)
+    for log in logs:
         # Examples come from cleaned lines (no ANSI codes or timestamps); line numbers
         # still match the stored log because cleaning keeps one line per line.
-        for line_no, line in enumerate(clean_log(text), start=1):
+        for line_no, line in enumerate(clean_log(log.text), start=1):
             for match in MASK_RE.finditer(line):
                 snippet = snippet_around(line, match.start(), match.end(), context)
-                found[match.group(1)].append(Example(row["job_id"], row["repo"], line_no, snippet))
-        stored: dict[str, int] = json.loads(row["redaction_counts"])
-        if not stored:
+                found[match.group(1)].append(Example(log.job_id, log.repo, line_no, snippet))
+        log_counts = log.counts
+        if log_counts is None:
             # Count on the raw text: cleaning drops text before a bare CR, markers included.
-            stored = dict(Counter(MASK_RE.findall(text)))
+            log_counts = dict(Counter(MASK_RE.findall(log.text)))
             from_markers += 1
-        counts.update(stored)
-        logs_per_rule.update(stored.keys())
+        if any(log_counts.values()):
+            with_redactions += 1
+        counts.update(log_counts)
+        logs_per_rule.update(k for k, v in log_counts.items() if v)
 
     # Known rules first in redactor order, then anything unexpected found in old logs.
     ordered = [r for r in RULE_NAMES if r in counts] + sorted(set(counts) - set(RULE_NAMES))
@@ -106,7 +111,35 @@ def collect_redaction_report(
     ]
     return RedactionReport(
         rules=rules,
-        logs_with_redactions=len(rows) - len(missing),
+        logs_with_redactions=with_redactions,
         logs_counted_from_markers=from_markers,
-        logs_missing=missing,
+        logs_missing=[],
     )
+
+
+def collect_redaction_report(
+    conn: sqlite3.Connection,
+    data_dir: Path,
+    rng: random.Random,
+    examples_per_rule: int = EXAMPLES_PER_RULE,
+    context: int = CONTEXT_CHARS,
+) -> RedactionReport:
+    """Report on every stored log with redactions."""
+    missing: list[int] = []
+    rows = conn.execute(
+        "SELECT job_id, repo, log_path, redaction_counts FROM failures"
+        " WHERE redactions > 0 ORDER BY job_id"
+    ).fetchall()
+
+    def stored_logs() -> Iterator[LogText]:
+        for row in rows:
+            path = data_dir / row["log_path"]
+            if not path.exists():
+                missing.append(row["job_id"])
+                continue
+            # '{}' means the row predates per-rule counts: count the stored masks.
+            stored: dict[str, int] = json.loads(row["redaction_counts"])
+            yield LogText(row["job_id"], row["repo"], read_log(path), stored or None)
+
+    report = build_redaction_report(stored_logs(), rng, examples_per_rule, context)
+    return replace(report, logs_missing=missing)

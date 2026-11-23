@@ -1,26 +1,34 @@
 """Re-download logs that older redaction rules over-masked, and redact them again.
 
 A log is a target when it was redacted with an older REDACTOR_VERSION and its stored
-file still holds a keyword_secret mask. Refetched logs are stamped with the current
-version, so running this again does not download them again, even when the new rules
-still (rightly) mask something in them.
+file holds a mask from a generic rule (the retired keyword_secret, or the current
+assignment_secret), since those are the rules that change. Refetched logs are stamped
+with the current version, so running this again does not download them again, even
+when the new rules still (rightly) mask something in them.
+
+preview_refetch downloads a sample of targets and redacts them in memory only, to
+check what new rules would do before rewriting anything.
 """
 
 import json
 import logging
+import random
 import sqlite3
+from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from cidoc.github_client import GitHubClient
 from cidoc.labeling.display import read_log
-from cidoc.miner.runs import download_job_log, store_log
-from cidoc.redact import REDACTOR_VERSION
+from cidoc.miner.redaction_report import LogText
+from cidoc.miner.runs import download_job_log, redact_log, store_log
+from cidoc.redact import MASK_RE, REDACTOR_VERSION
 
 logger = logging.getLogger(__name__)
 
-KEYWORD_MASK = "[REDACTED:keyword_secret]"
+# Masks from generic (heuristic) rules: the ones a rule change can make wrong.
+GENERIC_MASKS = ("[REDACTED:keyword_secret]", "[REDACTED:assignment_secret]")
 
 
 @dataclass(frozen=True)
@@ -40,7 +48,7 @@ class RefetchResult:
 
 
 def find_refetch_targets(conn: sqlite3.Connection, data_dir: Path) -> list[RefetchTarget]:
-    """Logs from older redactor versions whose stored file contains a keyword_secret mask.
+    """Logs from older redactor versions whose stored file contains a generic-rule mask.
 
     Logs already marked over_redacted are skipped: GitHub said they are gone.
     """
@@ -53,9 +61,13 @@ def find_refetch_targets(conn: sqlite3.Connection, data_dir: Path) -> list[Refet
     targets: list[RefetchTarget] = []
     for row in rows:
         path = data_dir / row["log_path"]
-        if path.exists() and KEYWORD_MASK in read_log(path):
+        if path.exists() and _has_generic_mask(read_log(path)):
             targets.append(RefetchTarget(row["job_id"], row["repo"], row["log_path"]))
     return targets
+
+
+def _has_generic_mask(text: str) -> bool:
+    return any(mask in text for mask in GENERIC_MASKS)
 
 
 def count_over_redacted(conn: sqlite3.Connection) -> int:
@@ -117,4 +129,52 @@ def refetch_logs(
                 "refetch failed: %s job %s: %s", target.repo, target.job_id, type(exc).__name__
             )
             result.failed.append((target.job_id, type(exc).__name__))
+    return result
+
+
+@dataclass
+class PreviewResult:
+    targets: int
+    """How many targets there were to sample from."""
+    logs: list[LogText] = field(default_factory=list)
+    """Sampled logs as the current rules redact them, in memory only."""
+    stored_counts: Counter[str] = field(default_factory=Counter)
+    """Masks per rule in the stored versions of the downloaded logs, for comparison."""
+    expired: list[RefetchTarget] = field(default_factory=list)
+    failed: list[tuple[int, str]] = field(default_factory=list)
+
+
+def preview_refetch(
+    client: GitHubClient,
+    data_dir: Path,
+    targets: list[RefetchTarget],
+    sample: int,
+    rng: random.Random,
+) -> PreviewResult:
+    """Download up to `sample` random targets and redact them in memory.
+
+    Reads the stored logs only to count their masks; writes nothing to disk or the DB.
+    """
+    result = PreviewResult(targets=len(targets))
+    for target in rng.sample(targets, min(sample, len(targets))):
+        try:
+            raw = download_job_log(client, target.repo, target.job_id)
+        except Exception as exc:
+            logger.warning(
+                "preview download failed: %s job %s: %s",
+                target.repo,
+                target.job_id,
+                type(exc).__name__,
+            )
+            result.failed.append((target.job_id, type(exc).__name__))
+            continue
+        if raw is None:
+            result.expired.append(target)
+            continue
+        redacted = redact_log(raw)
+        result.logs.append(
+            LogText(target.job_id, target.repo, redacted.text, dict(redacted.counts))
+        )
+        stored = read_log(data_dir / target.log_path)
+        result.stored_counts.update(MASK_RE.findall(stored))
     return result

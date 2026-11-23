@@ -28,12 +28,15 @@ from cidoc.miner.prune import apply_prune, plan_prune
 from cidoc.miner.redaction_report import (
     CONTEXT_CHARS,
     EXAMPLES_PER_RULE,
+    RedactionReport,
+    build_redaction_report,
     collect_redaction_report,
 )
 from cidoc.miner.refetch import (
     RefetchTarget,
     count_over_redacted,
     find_refetch_targets,
+    preview_refetch,
     refetch_logs,
 )
 from cidoc.miner.rules import RepoExcludes, load_repo_excludes
@@ -246,8 +249,13 @@ def mine_redaction_report(
     finally:
         conn.close()
 
+    print_redaction_report(report, empty="No redactions in stored logs.")
+
+
+def print_redaction_report(report: RedactionReport, empty: str) -> None:
+    """Counts per rule, then masked examples. Shared by redaction-report and refetch preview."""
     if not report.rules:
-        console.print("No redactions in stored logs.")
+        console.print(empty)
     else:
         table = Table(title=f"Redactions in {report.logs_with_redactions} logs")
         table.add_column("rule")
@@ -282,16 +290,30 @@ def mine_refetch(
         bool,
         typer.Option(
             "--only-redacted",
-            help="Refetch logs that older redaction rules masked with keyword_secret.",
+            help="Refetch logs that older rules masked with a generic (heuristic) rule.",
         ),
     ] = False,
     apply: Annotated[
         bool, typer.Option("--apply", help="Actually download. Without it, only report.")
     ] = False,
+    preview: Annotated[
+        int | None,
+        typer.Option(
+            min=1,
+            help="Download N random targets, redact in memory and report. Writes nothing.",
+        ),
+    ] = None,
+    examples: Annotated[
+        int, typer.Option(help="Preview: masked examples to show per rule.")
+    ] = EXAMPLES_PER_RULE,
+    seed: Annotated[int | None, typer.Option(help="Preview: random seed for the sample.")] = None,
 ) -> None:
     """Re-download over-redacted logs and redact them with the current rules (dry-run default)."""
     if not only_redacted:
         console.print("[red]Only --only-redacted is supported for now.[/red]")
+        raise typer.Exit(2)
+    if preview is not None and apply:
+        console.print("[red]--preview writes nothing; drop --apply to preview.[/red]")
         raise typer.Exit(2)
     data_dir = get_settings().data_dir
     conn = open_db()
@@ -307,6 +329,9 @@ def mine_refetch(
             console.print("Nothing to refetch.")
             return
         repos = len({t.repo for t in targets})
+        if preview is not None:
+            run_refetch_preview(data_dir, targets, preview, examples, seed)
+            return
         if not apply:
             console.print(
                 f"Would refetch {len(targets)} logs from {repos} repos."
@@ -334,6 +359,24 @@ def mine_refetch(
     )
     if result.failed:
         console.print("[yellow]Failed logs are unchanged; rerun to retry them.[/yellow]")
+
+
+def run_refetch_preview(
+    data_dir: Path, targets: list[RefetchTarget], sample: int, examples: int, seed: int | None
+) -> None:
+    rng = random.Random(seed)  # noqa: S311 - sampling only, not security
+    with open_github() as client:
+        result = preview_refetch(client, data_dir, targets, sample, rng)
+    console.print(
+        f"Preview: downloaded {len(result.logs)} of {result.targets} target logs"
+        f" (expired {len(result.expired)}, failed {len(result.failed)})."
+    )
+    console.print("[dim]Nothing written to disk or the DB.[/dim]")
+    if result.logs:
+        before = ", ".join(f"{rule} {n}" for rule, n in result.stored_counts.most_common())
+        console.print(f"Stored versions of these logs: {before or 'no masks'}.")
+    report = build_redaction_report(result.logs, rng, examples_per_rule=examples)
+    print_redaction_report(report, empty="The current rules mask nothing in these logs.")
 
 
 def count_table(title: str, label: str, rows: list[tuple[str, int]], total: int) -> Table:

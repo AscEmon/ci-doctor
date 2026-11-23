@@ -16,7 +16,7 @@ import httpx
 from cidoc.github_client import GitHubClient
 from cidoc.miner.fixpair import FixPairFinder
 from cidoc.miner.rules import is_fork_run, run_skip_reason
-from cidoc.redact import REDACTOR_VERSION, redact
+from cidoc.redact import REDACTOR_VERSION, Redaction, redact
 
 logger = logging.getLogger(__name__)
 
@@ -140,12 +140,17 @@ def download_job_log(client: GitHubClient, repo: str, job_id: int) -> bytes | No
         raise
 
 
+def redact_log(raw: bytes) -> Redaction:
+    """Decode a downloaded log (dropping any BOM) and redact it, exactly as stored."""
+    return redact(raw.decode("utf-8-sig", errors="replace"))
+
+
 def store_log(data_dir: Path, relpath: Path, raw: bytes) -> tuple[int, dict[str, int]]:
     """Redact and gzip a log under `data_dir`. Returns (uncompressed bytes, counts per rule).
 
     Writes to a temp file and renames, so an interrupted run never leaves a half-written log.
     """
-    result = redact(raw.decode("utf-8-sig", errors="replace"))
+    result = redact_log(raw)
     payload = result.text.encode("utf-8")
     dest = data_dir / relpath
     dest.parent.mkdir(parents=True, exist_ok=True)
