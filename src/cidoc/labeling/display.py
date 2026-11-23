@@ -6,6 +6,7 @@ shown here are the real line numbers in the stored log. Labelers cite them as ev
 
 import gzip
 import re
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -130,3 +131,166 @@ def render_view(console: Console, view: LogView) -> None:
             console.print(Text(f"   ({view.omitted_snippets} more snippets omitted)", style="dim"))
     console.rule(f"last {len(view.tail)} of {view.total_lines} lines")
     _render_lines(console, view.tail, view)
+
+
+# --- Failed-step focus view ---------------------------------------------------------
+#
+# GitHub job logs mark each step's start with "##[group]Run <command>"; the matching
+# "##[endgroup]" only closes the collapsed header (command, env), and the step's output,
+# including its "##[error]" lines, follows it. So a step runs from one "Run" header to
+# the next. Composite actions add "##[start-action ...;id=X]" ... "##[end-action id=X;
+# outcome=...]" pairs around their sub-steps, which tell us which parts succeeded.
+
+STEP_HEADER = "##[group]Run "
+START_ACTION = "##[start-action "
+END_ACTION = "##[end-action "
+ERROR_PREFIX = "##[error]"
+CLEANUP_LINE = "Post job cleanup."
+# Composite sub-steps with these outcomes carry nothing to diagnose.
+HIDDEN_OUTCOMES = frozenset({"success", "skipped"})
+LINES_BEFORE_ERROR = 15
+# A failed step up to this long is shown whole; longer ones are condensed.
+FULL_STEP_MAX_LINES = 150
+STEP_HEAD_LINES = 10
+
+
+def _action_attrs(line: str, prefix: str) -> dict[str, str]:
+    """Parse 'display=X;id=Y;outcome=Z' out of a start-/end-action line."""
+    body = line[len(prefix) :].removesuffix("]")
+    attrs: dict[str, str] = {}
+    for part in body.split(";"):
+        name, sep, value = part.partition("=")
+        if sep:
+            attrs[name.strip()] = value
+    return attrs
+
+
+@dataclass(frozen=True)
+class Step:
+    start: int
+    """0-based index of the step's first line."""
+    stop: int
+    """0-based index one past its last line."""
+    title: str
+
+
+def hidden_action_lines(lines: list[str], end: int) -> set[int]:
+    """Indices inside start-/end-action pairs whose outcome is success or skipped."""
+    hidden: set[int] = set()
+    open_actions: list[tuple[str, int]] = []
+    for i in range(end):
+        line = lines[i]
+        if line.startswith(START_ACTION):
+            open_actions.append((_action_attrs(line, START_ACTION).get("id", ""), i))
+        elif line.startswith(END_ACTION):
+            attrs = _action_attrs(line, END_ACTION)
+            for depth in range(len(open_actions) - 1, -1, -1):
+                if open_actions[depth][0] == attrs.get("id"):
+                    start = open_actions[depth][1]
+                    del open_actions[depth:]
+                    if attrs.get("outcome") in HIDDEN_OUTCOMES:
+                        hidden.update(range(start, i + 1))
+                    break
+    return hidden
+
+
+def split_steps(lines: list[str], end: int) -> list[Step]:
+    """Split lines[:end] at step headers; a start-action directly above a header joins it."""
+    starts: list[tuple[int, str]] = [(0, "Set up job")]
+    for i in range(end):
+        line = lines[i]
+        if line.startswith(START_ACTION):
+            title = _action_attrs(line, START_ACTION).get("display") or line
+            starts.append((i, title))
+        elif line.startswith(STEP_HEADER):
+            if starts and starts[-1][0] == i - 1 and lines[i - 1].startswith(START_ACTION):
+                continue  # header of the sub-step its start-action already opened
+            starts.append((i, line.removeprefix("##[group]")))
+    steps = []
+    for (start, title), (stop, _) in zip(starts, [*starts[1:], (end, "")], strict=True):
+        if stop > start:
+            steps.append(Step(start, stop, title))
+    return steps
+
+
+def _matches_failed_step(step: Step, failed_steps: Iterable[str]) -> bool:
+    title = step.title.strip().lower()
+    return any(name.strip().lower() == title for name in failed_steps if name.strip())
+
+
+@dataclass(frozen=True)
+class FocusView:
+    total_lines: int
+    blocks: list[list[NumberedLine]]
+    """Contiguous runs of shown lines, in log order."""
+    failed_titles: list[str]
+    hidden_after_cleanup: int
+    marker_lines: frozenset[int]
+
+    @property
+    def empty(self) -> bool:
+        return not self.blocks
+
+
+def build_focus_view(text: str, failed_steps: Iterable[str] = ()) -> FocusView:
+    """Only the failed step(s), condensed if long, plus the lines leading up to each error.
+
+    Line numbers stay those of the stored log, so they can be cited as evidence.
+    """
+    lines = clean_log(text)
+    end = next((i for i, line in enumerate(lines) if line.startswith(CLEANUP_LINE)), len(lines))
+    hidden = hidden_action_lines(lines, end)
+    errors = [i for i in range(end) if lines[i].startswith(ERROR_PREFIX) and i not in hidden]
+    failed_steps = list(failed_steps)
+
+    shown: set[int] = set()
+    titles: list[str] = []
+    for step in split_steps(lines, end):
+        has_error = any(step.start <= e < step.stop for e in errors)
+        if not has_error and not _matches_failed_step(step, failed_steps):
+            continue
+        titles.append(step.title)
+        visible = [i for i in range(step.start, step.stop) if i not in hidden]
+        if len(visible) <= FULL_STEP_MAX_LINES:
+            shown.update(visible)
+            continue
+        shown.update(visible[:STEP_HEAD_LINES])
+        step_lines = lines[step.start : step.stop]
+        windows = marker_windows(step_lines, len(step_lines), CONTEXT_LINES)[:MAX_SNIPPETS]
+        for start, stop in windows:
+            shown.update(i for i in range(step.start + start, step.start + stop) if i not in hidden)
+    for e in errors:
+        shown.update(i for i in range(max(0, e - LINES_BEFORE_ERROR), e + 1) if i not in hidden)
+
+    blocks: list[list[NumberedLine]] = []
+    for i in sorted(shown):
+        # Line numbers are 1-based, so the previous index i-1 shows as number i.
+        if blocks and blocks[-1][-1][0] == i:
+            blocks[-1].append((i + 1, lines[i]))
+        else:
+            blocks.append([(i + 1, lines[i])])
+    return FocusView(
+        total_lines=len(lines),
+        blocks=blocks,
+        failed_titles=titles,
+        hidden_after_cleanup=len(lines) - end,
+        marker_lines=frozenset(i + 1 for i, line in enumerate(lines) if is_marker(line)),
+    )
+
+
+def render_focus_view(console: Console, view: FocusView) -> None:
+    title = "; ".join(view.failed_titles) or "lines before errors"
+    console.rule(f"failed step focus: {title}", style="red")
+    width = len(str(view.total_lines))
+    for n, block in enumerate(view.blocks):
+        if n:
+            gap = block[0][0] - view.blocks[n - 1][-1][0] - 1
+            console.print(Text(f"   ⋯ {gap} lines", style="dim"))
+        for number, line in block:
+            row = Text(f"{number:>{width}} │ ", style="dim")
+            row.append(line, style="bold red" if number in view.marker_lines else "")
+            console.print(row, overflow="fold", highlight=False)
+    note = f"{view.total_lines} lines total"
+    if view.hidden_after_cleanup:
+        note += f"; {view.hidden_after_cleanup} after 'Post job cleanup.' hidden"
+    console.print(Text(f"   ({note}; press f for the full view)", style="dim"))

@@ -12,7 +12,15 @@ from pathlib import Path
 from rich.console import Console
 from rich.text import Text
 
-from cidoc.labeling.display import build_view, read_log, render_view
+from cidoc.labeling.display import (
+    FocusView,
+    LogView,
+    build_focus_view,
+    build_view,
+    read_log,
+    render_focus_view,
+    render_view,
+)
 from cidoc.labeling.labels import (
     CATEGORY_HINTS,
     CATEGORY_KEYS,
@@ -23,6 +31,7 @@ from cidoc.labeling.labels import (
 )
 
 SKIP_KEY = "s"
+TOGGLE_VIEW_KEY = "f"
 QUIT_KEYS = frozenset({"q", "\x03", "\x04"})  # q, Ctrl-C, Ctrl-D
 
 Getch = Callable[[], str]
@@ -158,13 +167,43 @@ def render_header(console: Console, c: Candidate, index: int, total: int) -> Non
         console.print(line, highlight=False)
 
 
-def render_menu(console: Console) -> None:
+def render_menu(console: Console, can_toggle: bool = False) -> None:
     entries = []
     for key, category in CATEGORY_KEYS.items():
         hint = CATEGORY_HINTS.get(category)
         entries.append(f"[cyan]{key}[/cyan] {category}" + (f" [dim]({hint})[/dim]" if hint else ""))
+    if can_toggle:
+        entries.append(f"[cyan]{TOGGLE_VIEW_KEY}[/cyan] toggle failed-step focus / full view")
     entries += [f"[cyan]{SKIP_KEY}[/cyan] skip", "[cyan]q[/cyan] quit"]
     console.print("\n".join(entries))
+
+
+class ViewToggle:
+    """Shows the failed-step focus view first; `toggle` flips to the full view and back.
+
+    Falls back to the full view, with no toggle, when no failed step can be located.
+    """
+
+    def __init__(self, console: Console, full: LogView, focus: FocusView) -> None:
+        self._console = console
+        self._full = full
+        self._focus = focus
+        self.can_toggle = not focus.empty
+        self.showing_focus = self.can_toggle
+
+    def render(self) -> None:
+        if self.showing_focus:
+            render_focus_view(self._console, self._focus)
+            return
+        if not self.can_toggle:
+            self._console.print(
+                Text("no failed step or ##[error] found; showing the full view", style="dim")
+            )
+        render_view(self._console, self._full)
+
+    def toggle(self) -> None:
+        self.showing_focus = not self.showing_focus
+        self.render()
 
 
 def read_key(console: Console, getch: Getch, valid: Iterable[str], prompt: str) -> str:
@@ -206,10 +245,17 @@ def label_one(
     c: Candidate,
     total_lines: int,
     now: datetime,
+    views: ViewToggle | None = None,
 ) -> Label | None:
     """Collect one label, or return None if skipped. Raises QuitRequestedError on quit."""
-    render_menu(console)
-    key = read_key(console, getch, [*CATEGORY_KEYS, SKIP_KEY], "category>")
+    can_toggle = views is not None and views.can_toggle
+    keys = [*CATEGORY_KEYS, SKIP_KEY, *([TOGGLE_VIEW_KEY] if can_toggle else [])]
+    while True:
+        render_menu(console, can_toggle)
+        key = read_key(console, getch, keys, "category>")
+        if key != TOGGLE_VIEW_KEY or views is None:
+            break
+        views.toggle()
     if key == SKIP_KEY:
         return None
     root_cause = ask_until_valid(console, ask, "root cause (one line)> ", parse_root_cause)
@@ -249,11 +295,13 @@ def run_session(
             console.print(f"[yellow]log missing, skipping[/yellow] {c.log_path}")
             result.skipped += 1
             continue
-        view = build_view(read_log(log_file))
+        text = read_log(log_file)
+        view = build_view(text)
+        views = ViewToggle(console, view, build_focus_view(text, c.failed_steps))
         render_header(console, c, index, len(picks))
-        render_view(console, view)
+        views.render()
         try:
-            label = label_one(console, getch, ask, c, view.total_lines, clock())
+            label = label_one(console, getch, ask, c, view.total_lines, clock(), views)
         except QuitRequestedError:
             result.quit = True
             break
