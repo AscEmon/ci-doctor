@@ -18,7 +18,7 @@ from cidoc.eval.metrics import compute_metrics
 from cidoc.eval.results import RUNS_DIRNAME, load_run
 from cidoc.eval.runner import load_cases, plan_run
 from cidoc.labeling.labels import LABELS_FILENAME
-from cidoc.llm.base import LLMError, Usage
+from cidoc.llm.base import LLMError, ServerUnavailableError, Usage
 from cidoc.llm.pricing import Price
 from tests.datadir import add_label, log_text, store_job
 from tests.fakes import VALID_DIAGNOSIS, ScriptedProvider, ok
@@ -169,30 +169,74 @@ def test_rerun_is_resumed_from_the_cache(data_dir: Path, provider: ScriptedProvi
     assert all(item.result.cached for item in load_run(run_files(data_dir)[-1]).items)
 
 
-def test_api_error_stops_cleanly_saves_partial_and_resumes(
+def test_failing_item_is_recorded_and_the_run_continues(
     data_dir: Path, provider: ScriptedProvider
 ) -> None:
     setup_jobs(data_dir)
-    provider.responses = [ok(VALID_DIAGNOSIS), LLMError("Gemini API error 429 quota")]
+    error = ServerUnavailableError("Gemini API error 503 UNAVAILABLE: overloaded")
+    provider.responses = [ok(VALID_DIAGNOSIS), error, ok(VALID_DIAGNOSIS)]
 
     first = run("--model", "fake-model")
 
-    assert first.exit_code == 1
-    assert "Stopped after 1 of 3" in first.output
-    partial = load_run(run_files(data_dir)[0])
-    assert not partial.info.complete
-    assert partial.info.stopped is not None
-    assert "job 2" in partial.info.stopped
-    assert [item.job_id for item in partial.items] == [1]
+    assert first.exit_code == 1  # finished, but not everything was scored
+    assert "job 2 ! dart_compile → not scored: ServerUnavailableError" in first.output
+    assert "1 items failed after retries and were not scored" in first.output
+    saved = load_run(run_files(data_dir)[0])
+    assert saved.info.complete
+    assert saved.info.stopped is None
+    assert [item.job_id for item in saved.items] == [1, 2, 3]
+    assert saved.items[1].error == "ServerUnavailableError: " + str(error)
+    assert saved.metrics["errored"] == 1
+    assert saved.metrics["n"] == 2  # job 2 is left out of the metrics
+    assert saved.metrics["accuracy"] == 0.5  # job 3: dart_compile for a pub failure
+    assert len(list((data_dir / "cache" / "analyze").glob("*.json"))) == 2  # not cached
 
-    provider.responses = [ok(VALID_DIAGNOSIS), ok(VALID_DIAGNOSIS)]
+
+def test_errored_items_are_retried_on_the_next_run(
+    data_dir: Path, provider: ScriptedProvider
+) -> None:
+    setup_jobs(data_dir)
+    provider.responses = [ok(VALID_DIAGNOSIS), LLMError("boom"), ok(VALID_DIAGNOSIS)]
+    run("--model", "fake-model")
+    provider.responses = [ok(VALID_DIAGNOSIS)]
+
     second = run("--model", "fake-model")
 
     assert second.exit_code == 0, second.output
-    assert len(provider.calls) == 2 + 2  # job 1 came from the cache
+    assert len(provider.calls) == 3 + 1  # only job 2 is called again
     resumed = load_run(run_files(data_dir)[-1])
-    assert resumed.info.complete
-    assert [item.result.cached for item in resumed.items] == [True, False, False]
+    assert [item.result.cached for item in resumed.items] == [True, False, True]
+    assert resumed.metrics["errored"] == 0
+
+
+def test_unexpected_errors_do_not_stop_the_run_either(
+    data_dir: Path, provider: ScriptedProvider
+) -> None:
+    setup_jobs(data_dir)
+    reset = ConnectionResetError("peer reset")
+    provider.responses = [reset, ok(VALID_DIAGNOSIS), ok(VALID_DIAGNOSIS)]
+
+    result = run("--model", "fake-model")
+
+    assert result.exit_code == 1
+    saved = load_run(run_files(data_dir)[0])
+    assert saved.items[0].error == "ConnectionResetError: peer reset"
+    assert [item.error for item in saved.items[1:]] == [None, None]
+
+
+def test_ctrl_c_stops_the_run_and_saves_what_was_scored(
+    data_dir: Path, provider: ScriptedProvider
+) -> None:
+    setup_jobs(data_dir)
+    provider.responses = [ok(VALID_DIAGNOSIS), KeyboardInterrupt()]
+
+    result = run("--model", "fake-model")
+
+    assert result.exit_code == 130
+    saved = load_run(run_files(data_dir)[0])
+    assert not saved.info.complete
+    assert saved.info.stopped == "interrupted (Ctrl-C)"
+    assert [item.job_id for item in saved.items] == [1]
 
 
 def test_missing_key_for_an_llm_model_exits_2(data_dir: Path) -> None:

@@ -26,6 +26,12 @@ def seconds(value: float | None) -> str:
 
 
 def render_item(console: Console, n: int, total: int, item: EvalItem) -> None:
+    if item.error is not None:
+        row = Text(f"[{n}/{total}] job {item.job_id} ", style="dim")
+        row.append("!", style="yellow")
+        row.append(f" {item.gold} → not scored: {item.error}", style="yellow")
+        console.print(row, overflow="ellipsis", no_wrap=True, highlight=False)
+        return
     mark = ("✓", "green") if item.correct else ("✗", "red")
     predicted = item.predicted or f"failed: {item.result.failure}"
     row = Text(f"[{n}/{total}] job {item.job_id} ", style="dim")
@@ -41,7 +47,7 @@ def render_summary(console: Console, info: RunInfo, metrics: Metrics) -> None:
     headline.add_column(style="bold")
     headline.add_column(justify="right")
     rows = [
-        ("items", f"{metrics.n} of {info.labels_total} labels"),
+        ("items scored", f"{metrics.n} of {info.labels_total} labels"),
         ("accuracy", f"{pct(metrics.accuracy)} ({metrics.correct}/{metrics.n})"),
         ("macro-F1", f"{pct(metrics.macro_f1)} ({len(metrics.macro_f1_categories)} categories)"),
         ("accuracy, confidence 3", f"{pct(metrics.confident_accuracy)} (n={metrics.confident_n})"),
@@ -52,6 +58,7 @@ def render_summary(console: Console, info: RunInfo, metrics: Metrics) -> None:
         ("mean cost per item", usd(metrics.mean_cost)),
         ("latency p50 / p95", f"{seconds(metrics.latency_p50)} / {seconds(metrics.latency_p95)}"),
         ("failed / blocked", f"{metrics.failed} / {metrics.blocked}"),
+        ("errored (API, not scored)", str(metrics.errored)),
         ("prompt version", info.prompt_version or "—"),
         ("guideline", info.guideline_hash),
     ]

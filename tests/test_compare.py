@@ -1,3 +1,4 @@
+import json
 from dataclasses import asdict, replace
 from pathlib import Path
 from typing import Any
@@ -190,3 +191,32 @@ def test_compare_bad_file_exits_2(data_dir: Path, tmp_path: Path) -> None:
 
     assert result.exit_code == 2
     assert "cannot read run file" in result.output
+
+
+def test_errored_items_are_not_compared() -> None:
+    errored = replace(item(2, TEST, None), error="ServerUnavailableError: 503")
+    b_with_error = run_file("model-b", [item(1, DEP, DEP), errored, item(3, INFRA, TEST)])
+
+    comparison = compare_runs(A, b_with_error, prices)
+
+    assert comparison.shared == 2
+    assert comparison.recomputed
+    assert comparison.only_a == [2]
+    assert [d.job_id for d in comparison.disagreements] == [3]
+
+
+def test_run_files_without_an_error_field_still_load(tmp_path: Path) -> None:
+    path = write(tmp_path / "old.json", A)
+    data = json.loads(path.read_text(encoding="utf-8"))
+    for saved in data["items"]:
+        del saved["error"]
+    path.write_text(json.dumps(data), encoding="utf-8")
+
+    assert all(i.error is None for i in load_run(path).items)
+
+
+def test_error_round_trips_through_run_files(tmp_path: Path) -> None:
+    errored = replace(item(2, TEST, None), error="LLMError: boom")
+    path = write(tmp_path / "e.json", run_file("m", [item(1, DEP, DEP), errored]))
+
+    assert [i.error for i in load_run(path).items] == [None, "LLMError: boom"]

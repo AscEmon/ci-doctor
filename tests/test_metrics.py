@@ -1,5 +1,7 @@
 """Metrics on a fixed fixture; every expected number is worked out by hand below."""
 
+from dataclasses import replace
+
 import pytest
 
 from cidoc.analyze.analyzer import AnalysisResult
@@ -177,3 +179,35 @@ def test_percentile(values: list[float], q: float, expected: float) -> None:
 
 def test_percentile_of_nothing() -> None:
     assert percentile([], 50) is None
+
+
+def test_errored_items_are_left_out_of_every_metric_but_counted() -> None:
+    errored = replace(item(DEP, None, confidence=3, gold_evidence=[5]), error="LLMError: 503")
+
+    with_error = compute_metrics([*FIXTURE, errored], PRICE)
+    without = compute_metrics(FIXTURE, PRICE)
+
+    assert with_error.errored == 1
+    assert without.errored == 0
+    for field in (
+        "n",
+        "correct",
+        "accuracy",
+        "macro_f1",
+        "per_category",
+        "confusion",
+        "confident_n",
+        "evidence_n",
+        "mean_cost",
+        "latency_p95",
+        "failed",
+        "blocked",
+    ):
+        assert getattr(with_error, field) == getattr(without, field), field
+
+
+def test_unusable_answers_still_count_as_wrong() -> None:
+    # A model answer that failed validation is model behavior, unlike an API error.
+    metrics = compute_metrics([item(DEP, DEP), item(DEP, None)], PRICE)
+
+    assert (metrics.n, metrics.accuracy, metrics.failed, metrics.errored) == (2, 0.5, 1, 0)

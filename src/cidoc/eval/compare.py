@@ -86,8 +86,9 @@ def _shared_metrics(items: list[EvalItem], shared: set[int], price: Price | None
 
 
 def compare_runs(a: RunFile, b: RunFile, price_for: Callable[[str], Price | None]) -> Comparison:
-    a_items = {item.job_id: item for item in a.items}
-    b_items = {item.job_id: item for item in b.items}
+    # Errored items were never scored, so they are not compared either.
+    a_items = {item.job_id: item for item in a.items if item.error is None}
+    b_items = {item.job_id: item for item in b.items if item.error is None}
     shared = set(a_items) & set(b_items)
     recomputed = set(a_items) != set(b_items)
     if recomputed:

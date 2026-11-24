@@ -1,7 +1,11 @@
 """Score predictions against human labels. Pure functions, no I/O.
 
 A result without a diagnosis (failed validation, blocked) has no prediction: it counts as
-wrong everywhere and shows up as FAILED in the confusion matrix.
+wrong everywhere and shows up as FAILED in the confusion matrix. That is model behavior.
+
+An item whose API call still failed after retries (EvalItem.error) says nothing about the
+model: it is left out of every metric except the `errored` count, and the next run
+retries it.
 """
 
 import math
@@ -29,6 +33,8 @@ class EvalItem:
     gold_confidence: int
     gold_evidence: list[int]
     result: AnalysisResult
+    error: str | None = None
+    """The API failed after retries ("ErrorType: message"): not scored."""
 
     @property
     def predicted(self) -> str | None:
@@ -76,7 +82,10 @@ class Metrics:
     latency_p95: float | None
     """Seconds per item, over items that made API calls."""
     failed: int
+    """Scored items whose answer was unusable after one retry; they count as wrong."""
     blocked: int
+    errored: int
+    """Items left out because the API failed after retries."""
 
 
 def _ratio(numerator: float, denominator: int) -> float:
@@ -127,11 +136,13 @@ def confusion_matrix(items: Sequence[EvalItem]) -> dict[str, dict[str, int]]:
 
 
 def compute_metrics(
-    items: Sequence[EvalItem],
+    all_items: Sequence[EvalItem],
     price: Price | None,
     min_support: int = MIN_SUPPORT,
     evidence_window: int = EVIDENCE_WINDOW,
 ) -> Metrics:
+    """Metrics over the scored items; errored items are only counted."""
+    items = [item for item in all_items if item.error is None]
     per_category = category_stats(items)
     scored = [c for c, s in per_category.items() if s.support >= min_support]
     support = Counter(item.gold for item in items)
@@ -172,4 +183,5 @@ def compute_metrics(
         latency_p95=percentile(latencies, 95),
         failed=len(failures),
         blocked=sum(f.startswith(BLOCKED_PREFIX) for f in failures),
+        errored=len(all_items) - len(items),
     )

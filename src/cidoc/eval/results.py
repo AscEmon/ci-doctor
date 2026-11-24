@@ -60,6 +60,7 @@ def item_to_dict(item: EvalItem) -> dict[str, Any]:
         "predicted": item.predicted,
         "correct": item.correct,
         "cached": item.result.cached,
+        "error": item.error,
         "result": result_to_dict(item.result),
     }
 
@@ -72,6 +73,7 @@ def item_from_dict(data: dict[str, Any]) -> EvalItem:
         gold_confidence=data["gold_confidence"],
         gold_evidence=list(data["gold_evidence"]),
         result=result,
+        error=data.get("error"),  # absent in runs saved before errored items existed
     )
 
 

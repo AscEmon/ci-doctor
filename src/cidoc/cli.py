@@ -156,9 +156,10 @@ def eval_command(
 ) -> None:
     """Score a model against the human labels and save the run to data/eval_runs/.
 
-    Resumable: items already in the response cache cost nothing. If the API fails or
-    --max-cost is reached, the run stops, saves what it scored, and a re-run picks up
-    from the cache.
+    Resumable: items already in the response cache cost nothing. An item whose API call
+    still fails after retries is recorded as not scored and the run goes on; a re-run
+    retries it. Only --max-cost and Ctrl-C stop the run early, after saving what it
+    scored. Exit code 1 if anything was not scored, 130 after Ctrl-C.
     """
     settings = get_settings()
     if compare is not None:
@@ -222,7 +223,7 @@ def eval_command(
         loaded.cases,
         predictor,
         on_item=lambda n, item: render_item(console, n, total, item),
-        stop_on=(LLMError, BudgetExceededError),
+        stop_on=(BudgetExceededError,),
     )
     metrics = compute_metrics(outcome.items, price)
     info = RunInfo(
@@ -247,8 +248,18 @@ def eval_command(
                 style="yellow",
             )
         )
+    if outcome.errored:
+        console.print(
+            Text(
+                f"{outcome.errored} items failed after retries and were not scored"
+                " (left out of the metrics, not cached); run again to retry them.",
+                style="yellow",
+            )
+        )
     console.print(f"Saved {path}")
-    if outcome.stopped:
+    if outcome.interrupted:
+        raise typer.Exit(130)
+    if outcome.stopped or outcome.errored:
         raise typer.Exit(1)
 
 

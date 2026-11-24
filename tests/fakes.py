@@ -27,7 +27,7 @@ def ok(data: dict[str, Any] | str, **kw: Any) -> StructuredResponse:
 
 
 class ScriptedProvider:
-    def __init__(self, *responses: StructuredResponse | Exception) -> None:
+    def __init__(self, *responses: StructuredResponse | BaseException) -> None:
         self.responses = list(responses)
         self.calls: list[tuple[str, str, dict[str, Any]]] = []
 
@@ -40,6 +40,6 @@ class ScriptedProvider:
     ) -> StructuredResponse:
         self.calls.append((system, user, schema))
         outcome = self.responses.pop(0)
-        if isinstance(outcome, Exception):
+        if isinstance(outcome, BaseException):
             raise outcome
         return outcome
