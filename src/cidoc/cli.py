@@ -20,6 +20,11 @@ from cidoc.analyze.preprocess import preprocess
 from cidoc.analyze.prompt import GuidelineError, load_prompt
 from cidoc.config import MissingGeminiKeyError, get_settings
 from cidoc.db import DB_FILENAME, connect
+from cidoc.eval.baseline import REGEX_BASELINE, Predictor, RegexBaseline
+from cidoc.eval.display import render_item, render_summary
+from cidoc.eval.metrics import compute_metrics
+from cidoc.eval.results import RunInfo, run_path, write_run
+from cidoc.eval.runner import LLMPredictor, load_cases, run_eval
 from cidoc.github_client import GitHubClient
 from cidoc.labeling.labels import (
     LABELS_FILENAME,
@@ -103,6 +108,88 @@ def main() -> None:
 def show_version() -> None:
     """Print the installed ci-doctor version."""
     console.print(version("ci-doctor"))
+
+
+@app.command("eval")
+def eval_command(
+    model: Annotated[
+        str | None,
+        typer.Option(help=f"LLM model, or {REGEX_BASELINE} (default: CIDOC_MODEL)."),
+    ] = None,
+    limit: Annotated[
+        int | None, typer.Option(min=1, help="Only the first N labels (in labels.jsonl order).")
+    ] = None,
+    refresh: Annotated[
+        bool, typer.Option("--refresh", help="Ignore cached results and call the API again.")
+    ] = False,
+) -> None:
+    """Score a model against the human labels and save the run to data/eval_runs/.
+
+    Resumable: items already in the response cache cost nothing. If the API fails, the
+    run stops, saves what it scored, and a re-run picks up from the cache.
+    """
+    settings = get_settings()
+    try:
+        prompt = load_prompt()
+    except GuidelineError as exc:
+        console.print(Text(str(exc), style="red"))
+        raise typer.Exit(2) from None
+    name = model or settings.cidoc_model
+    predictor: Predictor
+    if name == REGEX_BASELINE:
+        predictor, prompt_version, budget = RegexBaseline(), None, None
+    else:
+        try:
+            provider = create_provider(settings, name)
+        except MissingGeminiKeyError as exc:
+            console.print(Text(str(exc), style="red"))
+            raise typer.Exit(2) from None
+        budget = settings.cidoc_token_budget
+        cache = ResponseCache.in_data_dir(settings.data_dir)
+        predictor = LLMPredictor(provider, prompt, cache, budget, refresh=refresh)
+        prompt_version = prompt.version
+
+    loaded = load_cases(settings.data_dir, open_db, limit)
+    if loaded.missing:
+        console.print(
+            f"[yellow]{len(loaded.missing)} labeled jobs have no log and are not scored:[/yellow]"
+            f" {', '.join(map(str, loaded.missing))}"
+        )
+    if not loaded.cases:
+        console.print("[red]No labeled jobs with logs to evaluate.[/red]")
+        raise typer.Exit(1)
+
+    total = len(loaded.cases)
+    outcome = run_eval(
+        loaded.cases, predictor, on_item=lambda n, item: render_item(console, n, total, item)
+    )
+    price = settings.price_for(predictor.name)
+    metrics = compute_metrics(outcome.items, price)
+    info = RunInfo(
+        model=predictor.name,
+        created_at=datetime.now(UTC).isoformat(),
+        prompt_version=prompt_version,
+        guideline_hash=prompt.guideline_hash,
+        token_budget=budget,
+        labels_total=loaded.labels_total,
+        complete=outcome.stopped is None,
+        stopped=outcome.stopped,
+        missing=loaded.missing,
+    )
+    path = run_path(settings.data_dir, predictor.name, datetime.now(UTC))
+    write_run(path, info, outcome.items, metrics)
+    render_summary(console, info, metrics)
+    if outcome.stopped:
+        console.print(
+            Text(
+                f"Stopped after {len(outcome.items)} of {total}: {outcome.stopped}\n"
+                "Saved the partial run; run the same command again to resume from the cache.",
+                style="yellow",
+            )
+        )
+    console.print(f"Saved {path}")
+    if outcome.stopped:
+        raise typer.Exit(1)
 
 
 @app.command("analyze")
