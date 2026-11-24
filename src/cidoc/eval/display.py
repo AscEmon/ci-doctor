@@ -4,8 +4,10 @@ from rich.console import Console
 from rich.table import Table
 from rich.text import Text
 
+from cidoc.analyze.costguard import CallEstimate, RunEstimate
 from cidoc.eval.metrics import EvalItem, Metrics
 from cidoc.eval.results import RunInfo
+from cidoc.llm.pricing import Price
 
 TOP_CONFUSIONS = 8
 
@@ -87,3 +89,60 @@ def render_summary(console: Console, info: RunInfo, metrics: Metrics) -> None:
         console.print(Text("Most common confusions (label → prediction):", style="bold"))
         for count, gold, predicted in confusions:
             console.print(Text(f"  {count}x {gold} → {predicted}"))
+
+
+def duration(value: float) -> str:
+    minutes, secs = divmod(round(value), 60)
+    return f"~{minutes}m {secs:02d}s" if minutes else f"~{secs}s"
+
+
+def calls_within(calls: list[CallEstimate], price: Price, max_cost: float) -> int:
+    """How many of `calls`, in order, fit in `max_cost`."""
+    spent = 0.0
+    for n, call in enumerate(calls):
+        spent += call.cost(price)
+        if spent > max_cost:
+            return n
+    return len(calls)
+
+
+def render_estimate(
+    console: Console,
+    model: str,
+    estimate: RunEstimate,
+    rpm: int,
+    calls: list[CallEstimate],
+    price: Price | None,
+    max_cost: float | None,
+) -> None:
+    table = Table(title=f"dry run: {model}", title_justify="left")
+    table.add_column(style="bold")
+    table.add_column(justify="right")
+    table.show_header = False
+    rows = [
+        ("items", str(estimate.items)),
+        ("cached (free)", str(estimate.cached)),
+        ("API calls", str(estimate.calls)),
+        ("input tokens (est.)", f"{estimate.input_tokens:,}"),
+        ("output tokens (allowance)", f"{estimate.output_tokens:,}"),
+        ("cost (est.)", usd(estimate.cost)),
+        (f"duration at {rpm} RPM", duration(estimate.duration_s)),
+    ]
+    for name, value in rows:
+        table.add_row(name, value)
+    console.print(table)
+    notes = [
+        "No API calls were made.",
+        "Estimates use 4 characters per token; validation retries are not included.",
+    ]
+    if price is None and estimate.calls:
+        notes.append(f"No price configured for {model}: set CIDOC_PRICES.")
+    if max_cost is not None and price is not None:
+        fit = calls_within(calls, price, max_cost)
+        if fit < len(calls):
+            notes.append(
+                f"--max-cost ${max_cost} covers about {fit} of {len(calls)} calls;"
+                " the run would stop there and save what it scored."
+            )
+    for note in notes:
+        console.print(Text(note, style="dim"))

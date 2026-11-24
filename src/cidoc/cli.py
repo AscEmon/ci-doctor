@@ -13,7 +13,12 @@ from rich.table import Table
 from rich.text import Text
 
 from cidoc.analyze.cache import ResponseCache, analyze_cached
-from cidoc.analyze.costguard import BudgetedProvider, BudgetExceededError, CostGuard
+from cidoc.analyze.costguard import (
+    BudgetedProvider,
+    BudgetExceededError,
+    CostGuard,
+    estimate_run,
+)
 from cidoc.analyze.display import render_result, render_usage
 from cidoc.analyze.inputs import InputError, resolve_input
 from cidoc.analyze.preprocess import preprocess
@@ -21,10 +26,10 @@ from cidoc.analyze.prompt import GuidelineError, load_prompt
 from cidoc.config import MissingGeminiKeyError, get_settings
 from cidoc.db import DB_FILENAME, connect
 from cidoc.eval.baseline import REGEX_BASELINE, Predictor, RegexBaseline
-from cidoc.eval.display import render_item, render_summary
+from cidoc.eval.display import render_estimate, render_item, render_summary
 from cidoc.eval.metrics import compute_metrics
 from cidoc.eval.results import RunInfo, run_path, write_run
-from cidoc.eval.runner import LLMPredictor, load_cases, run_eval
+from cidoc.eval.runner import LLMPredictor, load_cases, plan_run, run_eval
 from cidoc.github_client import GitHubClient
 from cidoc.labeling.labels import (
     LABELS_FILENAME,
@@ -122,11 +127,24 @@ def eval_command(
     refresh: Annotated[
         bool, typer.Option("--refresh", help="Ignore cached results and call the API again.")
     ] = False,
+    max_cost: Annotated[
+        float | None,
+        typer.Option(
+            "--max-cost",
+            min=0,
+            help="Stop before a call whose estimated cost would push the run past this USD.",
+        ),
+    ] = None,
+    dry_run: Annotated[
+        bool,
+        typer.Option("--dry-run", help="Estimate tokens, cost and duration; make no API calls."),
+    ] = False,
 ) -> None:
     """Score a model against the human labels and save the run to data/eval_runs/.
 
-    Resumable: items already in the response cache cost nothing. If the API fails, the
-    run stops, saves what it scored, and a re-run picks up from the cache.
+    Resumable: items already in the response cache cost nothing. If the API fails or
+    --max-cost is reached, the run stops, saves what it scored, and a re-run picks up
+    from the cache.
     """
     settings = get_settings()
     try:
@@ -135,19 +153,11 @@ def eval_command(
         console.print(Text(str(exc), style="red"))
         raise typer.Exit(2) from None
     name = model or settings.cidoc_model
-    predictor: Predictor
-    if name == REGEX_BASELINE:
-        predictor, prompt_version, budget = RegexBaseline(), None, None
-    else:
-        try:
-            provider = create_provider(settings, name)
-        except MissingGeminiKeyError as exc:
-            console.print(Text(str(exc), style="red"))
-            raise typer.Exit(2) from None
-        budget = settings.cidoc_token_budget
-        cache = ResponseCache.in_data_dir(settings.data_dir)
-        predictor = LLMPredictor(provider, prompt, cache, budget, refresh=refresh)
-        prompt_version = prompt.version
+    baseline = name == REGEX_BASELINE
+    price = settings.price_for(name)
+    if max_cost is not None and not baseline and price is None:
+        console.print(Text(f"--max-cost needs a price for {name}: set CIDOC_PRICES.", "red"))
+        raise typer.Exit(2)
 
     loaded = load_cases(settings.data_dir, open_db, limit)
     if loaded.missing:
@@ -159,18 +169,45 @@ def eval_command(
         console.print("[red]No labeled jobs with logs to evaluate.[/red]")
         raise typer.Exit(1)
 
+    budget = settings.cidoc_token_budget
+    cache = ResponseCache.in_data_dir(settings.data_dir)
+    if dry_run:
+        if baseline:
+            console.print(f"dry run: {REGEX_BASELINE}, {len(loaded.cases)} items, no API calls, $0")
+            return
+        plan = plan_run(loaded.cases, prompt, cache, name, budget, refresh=refresh)
+        estimate = estimate_run(plan.calls, plan.cached, price, settings.cidoc_rpm)
+        render_estimate(console, name, estimate, settings.cidoc_rpm, plan.calls, price, max_cost)
+        return
+
+    predictor: Predictor
+    if baseline:
+        predictor, prompt_version, run_budget = RegexBaseline(), None, None
+    else:
+        try:
+            provider = create_provider(settings, name)
+        except MissingGeminiKeyError as exc:
+            console.print(Text(str(exc), style="red"))
+            raise typer.Exit(2) from None
+        if max_cost is not None and price is not None:
+            provider = BudgetedProvider(provider, CostGuard(max_cost, price))
+        predictor = LLMPredictor(provider, prompt, cache, budget, refresh=refresh)
+        prompt_version, run_budget = prompt.version, budget
+
     total = len(loaded.cases)
     outcome = run_eval(
-        loaded.cases, predictor, on_item=lambda n, item: render_item(console, n, total, item)
+        loaded.cases,
+        predictor,
+        on_item=lambda n, item: render_item(console, n, total, item),
+        stop_on=(LLMError, BudgetExceededError),
     )
-    price = settings.price_for(predictor.name)
     metrics = compute_metrics(outcome.items, price)
     info = RunInfo(
         model=predictor.name,
         created_at=datetime.now(UTC).isoformat(),
         prompt_version=prompt_version,
         guideline_hash=prompt.guideline_hash,
-        token_budget=budget,
+        token_budget=run_budget,
         labels_total=loaded.labels_total,
         complete=outcome.stopped is None,
         stopped=outcome.stopped,

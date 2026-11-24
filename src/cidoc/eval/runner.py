@@ -12,7 +12,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from cidoc.analyze.analyzer import AnalysisResult
-from cidoc.analyze.cache import ResponseCache, analyze_cached
+from cidoc.analyze.cache import ResponseCache, analyze_cached, cache_key, log_hash
+from cidoc.analyze.costguard import CallEstimate, estimate_call
 from cidoc.analyze.inputs import AnalysisInput, InputError, from_job_id
 from cidoc.analyze.preprocess import PreprocessedLog, preprocess
 from cidoc.analyze.prompt import Prompt
@@ -87,6 +88,37 @@ class LLMPredictor:
     def predict(self, source: AnalysisInput) -> AnalysisResult:
         log = self.preprocess(source)
         return analyze_cached(self.provider, log, self.prompt, self.cache, refresh=self.refresh)
+
+
+@dataclass(frozen=True)
+class RunPlan:
+    calls: list[CallEstimate]
+    """One estimate per uncached case, in run order."""
+    cached: int
+
+
+def plan_run(
+    cases: list[EvalCase],
+    prompt: Prompt,
+    cache: ResponseCache,
+    model: str,
+    token_budget: int,
+    refresh: bool = False,
+) -> RunPlan:
+    """What an LLM run would send, without a provider or any API call.
+
+    Cached cases are free; every other case is estimated as one call.
+    """
+    calls: list[CallEstimate] = []
+    cached = 0
+    for case in cases:
+        log = preprocess(case.source.text, case.source.failed_steps, token_budget)
+        key = cache_key(prompt.version, log_hash(log), model)
+        if not refresh and cache.get(key) is not None:
+            cached += 1
+        else:
+            calls.append(estimate_call(prompt.system, prompt.user(log)))
+    return RunPlan(calls, cached)
 
 
 def to_item(case: EvalCase, result: AnalysisResult) -> EvalItem:
