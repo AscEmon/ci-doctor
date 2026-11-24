@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from pydantic import ValidationError
 
 from cidoc.analyze.preprocess import PreprocessedLog
-from cidoc.analyze.prompt import SYSTEM_INSTRUCTION, user_prompt
+from cidoc.analyze.prompt import Prompt
 from cidoc.analyze.schema import RESPONSE_SCHEMA, Diagnosis
 from cidoc.llm.base import LLMProvider, StructuredResponse, Usage
 
@@ -75,13 +75,13 @@ def retry_prompt(prompt: str, error: str) -> str:
     )
 
 
-def analyze_log(provider: LLMProvider, log: PreprocessedLog) -> AnalysisResult:
-    prompt = user_prompt(log)
+def analyze_log(provider: LLMProvider, log: PreprocessedLog, prompt: Prompt) -> AnalysisResult:
+    user = prompt.user(log)
     calls: list[Usage] = []
     error = ""
     for attempt in range(MAX_ATTEMPTS):
-        text = prompt if attempt == 0 else retry_prompt(prompt, error)
-        response = provider.generate_structured(SYSTEM_INSTRUCTION, text, RESPONSE_SCHEMA)
+        text = user if attempt == 0 else retry_prompt(user, error)
+        response = provider.generate_structured(prompt.system, text, RESPONSE_SCHEMA)
         calls.append(response.usage)
         try:
             diagnosis = parse_response(response, log.total_lines)

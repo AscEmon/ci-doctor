@@ -5,12 +5,13 @@ import pytest
 
 from cidoc.analyze.analyzer import MAX_ATTEMPTS, analyze_log
 from cidoc.analyze.preprocess import PreprocessedLog, preprocess
-from cidoc.analyze.prompt import SYSTEM_INSTRUCTION
+from cidoc.analyze.prompt import load_prompt
 from cidoc.analyze.schema import RESPONSE_SCHEMA, ROOT_CAUSE_MAX_CHARS, Diagnosis
 from cidoc.labeling.labels import CATEGORIES
 from cidoc.llm.base import LLMError, StructuredResponse, Usage
 
 TS = "2026-10-01T12:34:56.1234567Z "
+PROMPT = load_prompt()
 
 VALID: dict[str, Any] = {
     "category": "dart_compile",
@@ -75,7 +76,7 @@ def test_schema_enum_is_the_taxonomy() -> None:
 def test_valid_response_on_first_call() -> None:
     provider = ScriptedProvider(ok(VALID))
 
-    result = analyze_log(provider, log())
+    result = analyze_log(provider, log(), PROMPT)
 
     assert result.ok
     assert result.diagnosis == Diagnosis(**VALID)
@@ -83,7 +84,7 @@ def test_valid_response_on_first_call() -> None:
     assert result.model == "fake-model"
     assert len(result.calls) == 1
     system, user, schema = provider.calls[0]
-    assert system == SYSTEM_INSTRUCTION
+    assert system == PROMPT.system
     assert "L5| lib/main.dart:3:5: Error: Undefined name 'foo'." in user
     assert schema is RESPONSE_SCHEMA
 
@@ -112,7 +113,7 @@ def test_invalid_response_is_retried_once_with_the_error(
 ) -> None:
     provider = ScriptedProvider(bad, ok(VALID))
 
-    result = analyze_log(provider, log())
+    result = analyze_log(provider, log(), PROMPT)
 
     assert result.ok
     assert len(result.calls) == 2
@@ -134,7 +135,7 @@ def test_invalid_response_is_retried_once_with_the_error(
 def test_second_failure_is_recorded_not_raised(bad: StructuredResponse, reason: str) -> None:
     provider = ScriptedProvider(bad, bad)
 
-    result = analyze_log(provider, log())
+    result = analyze_log(provider, log(), PROMPT)
 
     assert not result.ok
     assert result.diagnosis is None
@@ -147,7 +148,7 @@ def test_validation_error_does_not_echo_model_output() -> None:
     long_cause = "SECRET-LOOKING-" + "x" * 300
     provider = ScriptedProvider(ok({**VALID, "root_cause": long_cause}), ok(VALID))
 
-    analyze_log(provider, log())
+    analyze_log(provider, log(), PROMPT)
 
     assert long_cause not in provider.calls[1][1]
 
@@ -156,13 +157,13 @@ def test_api_errors_propagate() -> None:
     provider = ScriptedProvider(LLMError("500 INTERNAL"))
 
     with pytest.raises(LLMError):
-        analyze_log(provider, log())
+        analyze_log(provider, log(), PROMPT)
 
 
 def test_usage_of_every_call_is_kept() -> None:
     first, second = Usage(100, 5, 0.2), Usage(120, 30, 0.4)
     provider = ScriptedProvider(ok("bad", usage=first), ok(VALID, usage=second))
 
-    result = analyze_log(provider, log())
+    result = analyze_log(provider, log(), PROMPT)
 
     assert result.calls == [first, second]
