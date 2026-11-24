@@ -26,6 +26,12 @@ ERROR_MARKERS = (
     "Exception",
     "FAILED",
     "Could not resolve",
+    "Could not find",
+    "version solving failed",
+    # git push/fetch and HTTP uploads.
+    "remote: error",
+    "remote: fatal",
+    "Received status code",
     # Xcode, CocoaPods and fastlane.
     "❌",
     "** ARCHIVE FAILED **",
@@ -273,7 +279,7 @@ class FocusView:
 
 
 @dataclass(frozen=True)
-class _LogSteps:
+class LogSteps:
     lines: list[str]
     end: int
     """Index of 'Post job cleanup.' (or len(lines)): nothing from here on is considered."""
@@ -285,7 +291,7 @@ class _LogSteps:
     """Where each fastlane update notice begins; the real error is usually just above."""
 
 
-def _locate_failed_steps(text: str, failed_steps: Iterable[str]) -> _LogSteps:
+def locate_failed_steps(text: str, failed_steps: Iterable[str]) -> LogSteps:
     """Steps that contain an ##[error] or match a failed step name from the API."""
     lines = clean_log(text)
     end = next((i for i, line in enumerate(lines) if line.startswith(CLEANUP_LINE)), len(lines))
@@ -300,12 +306,12 @@ def _locate_failed_steps(text: str, failed_steps: Iterable[str]) -> _LogSteps:
         for step in split_steps(lines, end)
         if any(step.start <= e < step.stop for e in errors) or _matches_failed_step(step, names)
     ]
-    return _LogSteps(lines, end, hidden, errors, failed, [start for start, _ in noise])
+    return LogSteps(lines, end, hidden, errors, failed, [start for start, _ in noise])
 
 
 def visible_line_numbers(text: str) -> list[int]:
     """1-based numbers of lines before 'Post job cleanup.' that are not known noise."""
-    located = _locate_failed_steps(text, ())
+    located = locate_failed_steps(text, ())
     return [i + 1 for i in range(located.end) if i not in located.hidden]
 
 
@@ -315,7 +321,7 @@ def failed_step_lines(text: str, failed_steps: Iterable[str] = ()) -> list[str]:
     For rules that need to read what the failing step ran (its header, env and output).
     Empty when no failed step can be located.
     """
-    located = _locate_failed_steps(text, failed_steps)
+    located = locate_failed_steps(text, failed_steps)
     return [
         located.lines[i]
         for step in located.failed
@@ -324,34 +330,51 @@ def failed_step_lines(text: str, failed_steps: Iterable[str] = ()) -> list[str]:
     ]
 
 
-def build_focus_view(text: str, failed_steps: Iterable[str] = ()) -> FocusView:
-    """Only the failed step(s), condensed if long, plus the lines leading up to each error.
+def focus_indices(
+    located: LogSteps,
+    context: int = CONTEXT_LINES,
+    max_snippets: int | None = MAX_SNIPPETS,
+    hidden: set[int] | None = None,
+) -> set[int]:
+    """0-based indices the focus view shows: the failed step(s), condensed if long, and
+    the lines leading up to each error and to each fastlane update notice.
 
-    Line numbers stay those of the stored log, so they can be cited as evidence.
+    `context` and `max_snippets` size the marker windows of condensed steps; `hidden`
+    overrides `located.hidden` (callers may hide more noise).
     """
-    located = _locate_failed_steps(text, failed_steps)
-    lines, end, hidden, errors = located.lines, located.end, located.hidden, located.errors
-
+    lines = located.lines
+    if hidden is None:
+        hidden = located.hidden
     shown: set[int] = set()
-    titles: list[str] = []
     for step in located.failed:
-        titles.append(step.title)
         visible = [i for i in range(step.start, step.stop) if i not in hidden]
         if len(visible) <= FULL_STEP_MAX_LINES:
             shown.update(visible)
             continue
         shown.update(visible[:STEP_HEAD_LINES])
         step_lines = lines[step.start : step.stop]
-        windows = marker_windows(step_lines, len(step_lines), CONTEXT_LINES)[:MAX_SNIPPETS]
+        windows = marker_windows(step_lines, len(step_lines), context)[:max_snippets]
         for start, stop in windows:
             shown.update(i for i in range(step.start + start, step.start + stop) if i not in hidden)
-    for e in errors:
+    for e in located.errors:
         shown.update(i for i in range(max(0, e - LINES_BEFORE_ERROR), e + 1) if i not in hidden)
     # fastlane prints its update notice right after the failure: show what came before it.
     for n in located.noise_starts:
         if any(step.start <= n < step.stop for step in located.failed):
             lead = range(max(0, n - LINES_BEFORE_NOISE), n)
             shown.update(i for i in lead if i not in hidden)
+    return shown
+
+
+def build_focus_view(text: str, failed_steps: Iterable[str] = ()) -> FocusView:
+    """Only the failed step(s), condensed if long, plus the lines leading up to each error.
+
+    Line numbers stay those of the stored log, so they can be cited as evidence.
+    """
+    located = locate_failed_steps(text, failed_steps)
+    lines, end = located.lines, located.end
+    shown = focus_indices(located)
+    titles = [step.title for step in located.failed]
 
     blocks: list[list[NumberedLine]] = []
     for i in sorted(shown):
