@@ -15,7 +15,13 @@ from google import genai
 from google.genai import errors, types
 from pydantic import SecretStr
 
-from cidoc.llm.base import LLMError, RateLimitedError, StructuredResponse, Usage
+from cidoc.llm.base import (
+    LLMError,
+    RateLimitedError,
+    ServerUnavailableError,
+    StructuredResponse,
+    Usage,
+)
 from cidoc.llm.ratelimit import RateLimiter, call_with_backoff
 
 _RETRY_INFO = "type.googleapis.com/google.rpc.RetryInfo"
@@ -48,8 +54,20 @@ def retry_delay(details: Any) -> float | None:
     return None
 
 
+# Retried with backoff. Anything else (400 INVALID_ARGUMENT, 403, 404, ...) is the
+# request's fault and fails at once.
+_RATE_LIMIT_CODES = frozenset({429})
+_RATE_LIMIT_STATUSES = frozenset({"RESOURCE_EXHAUSTED"})
+_SERVER_CODES = frozenset({500, 502, 503, 504})
+_SERVER_STATUSES = frozenset({"UNAVAILABLE", "INTERNAL", "DEADLINE_EXCEEDED"})
+
+
 def _is_rate_limit(e: errors.APIError) -> bool:
-    return e.code == 429 or e.status == "RESOURCE_EXHAUSTED"
+    return e.code in _RATE_LIMIT_CODES or e.status in _RATE_LIMIT_STATUSES
+
+
+def _is_server_error(e: errors.APIError) -> bool:
+    return e.code in _SERVER_CODES or e.status in _SERVER_STATUSES
 
 
 def _enum_value(value: Any) -> str | None:
@@ -103,6 +121,8 @@ class GeminiProvider:
                 message = f"Gemini API error {e.code} {e.status}: {e.message}"
                 if _is_rate_limit(e):
                     raise RateLimitedError(message, retry_delay(e.details)) from e
+                if _is_server_error(e):
+                    raise ServerUnavailableError(message, retry_delay(e.details)) from e
                 raise LLMError(message) from e
             return response, self._clock() - start
 

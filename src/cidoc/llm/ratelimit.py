@@ -1,4 +1,4 @@
-"""Client-side requests-per-minute limit and backoff on rate-limit errors."""
+"""Client-side requests-per-minute limit and backoff on transient errors (429, 5xx)."""
 
 import time
 from collections import deque
@@ -12,7 +12,7 @@ from tenacity import (
     wait_exponential,
 )
 
-from cidoc.llm.base import RateLimitedError
+from cidoc.llm.base import TransientError
 
 WINDOW_S = 60.0
 MAX_ATTEMPTS = 5
@@ -51,7 +51,7 @@ def backoff_wait(state: RetryCallState) -> float:
     """Exponential backoff, but never shorter than the delay the API asked for."""
     wait = _exponential(state)
     exc = state.outcome.exception() if state.outcome else None
-    if isinstance(exc, RateLimitedError) and exc.retry_after:
+    if isinstance(exc, TransientError) and exc.retry_after:
         wait = max(wait, exc.retry_after)
     return wait
 
@@ -62,9 +62,9 @@ def call_with_backoff[T](
     sleep: Callable[[float], None] = time.sleep,
     max_attempts: int = MAX_ATTEMPTS,
 ) -> tuple[T, int]:
-    """Call `fn` within the rate limit, retrying RateLimitedError. Returns (result, attempts).
+    """Call `fn` within the rate limit, retrying TransientError. Returns (result, attempts).
 
-    Other errors propagate at once; after `max_attempts` the last RateLimitedError does.
+    Other errors propagate at once; after `max_attempts` the last TransientError does.
     """
     attempts = 0
 
@@ -76,7 +76,7 @@ def call_with_backoff[T](
 
     retrying = Retrying(
         stop=stop_after_attempt(max_attempts),
-        retry=retry_if_exception_type(RateLimitedError),
+        retry=retry_if_exception_type(TransientError),
         wait=backoff_wait,
         sleep=sleep,
         reraise=True,

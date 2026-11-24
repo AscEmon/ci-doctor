@@ -8,7 +8,13 @@ from google.genai import errors, types
 from pydantic import SecretStr
 
 from cidoc.config import MissingGeminiKeyError, Settings
-from cidoc.llm.base import LLMError, RateLimitedError, StructuredResponse, Usage
+from cidoc.llm.base import (
+    LLMError,
+    RateLimitedError,
+    ServerUnavailableError,
+    StructuredResponse,
+    Usage,
+)
 from cidoc.llm.factory import create_provider
 from cidoc.llm.gemini import GeminiProvider, retry_delay
 from cidoc.llm.pricing import Price
@@ -86,6 +92,21 @@ def rate_limit_error(delay: str | None = "7s") -> errors.ClientError:
         }
     }
     return errors.ClientError(429, body)
+
+
+def server_error(
+    code: int = 503, status: str = "UNAVAILABLE", delay: str | None = None
+) -> errors.ServerError:
+    details = [{"@type": RETRY_INFO, "retryDelay": delay}] if delay else []
+    body = {
+        "error": {
+            "code": code,
+            "message": "The model is overloaded. Please try again later.",
+            "status": status,
+            "details": details,
+        }
+    }
+    return errors.ServerError(code, body)
 
 
 class FakeModels:
@@ -286,6 +307,77 @@ def test_gemini_gives_up_on_persistent_429() -> None:
     with pytest.raises(RateLimitedError, match="RESOURCE_EXHAUSTED"):
         provider(client, FakeTime()).generate_structured("s", "u", SCHEMA)
     assert len(client.models.calls) == MAX_ATTEMPTS
+
+
+def test_gemini_retries_503_and_succeeds_on_the_third_attempt() -> None:
+    fake = FakeTime()
+    client = FakeClient(server_error(), server_error(), response())
+
+    result = provider(client, fake).generate_structured("s", "u", SCHEMA)
+
+    assert result.complete
+    assert result.usage.attempts == 3
+    assert len(client.models.calls) == 3
+    assert fake.sleeps == [1.0, 2.0]  # the same exponential backoff as 429
+
+
+@pytest.mark.parametrize(
+    ("code", "status"),
+    [
+        (500, "INTERNAL"),
+        (502, "BAD_GATEWAY"),
+        (503, "UNAVAILABLE"),
+        (504, "DEADLINE_EXCEEDED"),
+        (499, "UNAVAILABLE"),  # retryable by status even with an unusual code
+        (400, "INTERNAL"),
+        (400, "DEADLINE_EXCEEDED"),
+    ],
+)
+def test_gemini_retries_transient_server_errors(code: int, status: str) -> None:
+    client = FakeClient(server_error(code, status), response())
+
+    result = provider(client, FakeTime()).generate_structured("s", "u", SCHEMA)
+
+    assert result.usage.attempts == 2
+
+
+def test_gemini_server_error_honors_the_api_retry_delay() -> None:
+    fake = FakeTime()
+    client = FakeClient(server_error(delay="10s"), response())
+
+    provider(client, fake).generate_structured("s", "u", SCHEMA)
+
+    assert fake.sleeps == [10.0]
+
+
+def test_gemini_gives_up_on_persistent_503() -> None:
+    client = FakeClient(*[server_error() for _ in range(MAX_ATTEMPTS)])
+
+    with pytest.raises(ServerUnavailableError, match="503 UNAVAILABLE"):
+        provider(client, FakeTime()).generate_structured("s", "u", SCHEMA)
+    assert len(client.models.calls) == MAX_ATTEMPTS
+
+
+def test_rate_limits_and_server_errors_share_the_attempt_budget() -> None:
+    client = FakeClient(rate_limit_error(None), server_error(), rate_limit_error(None), response())
+
+    result = provider(client, FakeTime()).generate_structured("s", "u", SCHEMA)
+
+    assert result.usage.attempts == 4
+
+
+@pytest.mark.parametrize(
+    ("code", "status"),
+    [(400, "INVALID_ARGUMENT"), (403, "PERMISSION_DENIED"), (404, "NOT_FOUND")],
+)
+def test_gemini_does_not_retry_request_errors(code: int, status: str) -> None:
+    error = errors.ClientError(code, {"error": {"code": code, "status": status}})
+    client = FakeClient(error)
+
+    with pytest.raises(LLMError) as exc_info:
+        provider(client, FakeTime()).generate_structured("s", "u", SCHEMA)
+    assert type(exc_info.value) is LLMError
+    assert len(client.models.calls) == 1
 
 
 def test_gemini_does_not_retry_other_api_errors() -> None:

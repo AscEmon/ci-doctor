@@ -51,9 +51,18 @@ class LLMError(RuntimeError):
     """The provider API failed (after retries, where retrying applies)."""
 
 
-class RateLimitedError(LLMError):
-    """HTTP 429 / quota exhausted. `retry_after` is the delay the API asked for, if any."""
+class TransientError(LLMError):
+    """A failure worth retrying with backoff. `retry_after` is the delay the API asked
+    for, if any."""
 
     def __init__(self, message: str, retry_after: float | None = None) -> None:
         super().__init__(message)
         self.retry_after = retry_after
+
+
+class RateLimitedError(TransientError):
+    """HTTP 429 / quota exhausted."""
+
+
+class ServerUnavailableError(TransientError):
+    """HTTP 500/502/503/504: the service failed or was overloaded, not the request."""
