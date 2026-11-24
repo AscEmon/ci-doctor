@@ -5,8 +5,9 @@ from rich.table import Table
 from rich.text import Text
 
 from cidoc.analyze.costguard import CallEstimate, RunEstimate
-from cidoc.eval.metrics import EvalItem, Metrics
-from cidoc.eval.results import RunInfo
+from cidoc.eval.compare import Comparison, MetricDelta
+from cidoc.eval.metrics import FAILED, EvalItem, Metrics
+from cidoc.eval.results import RunFile, RunInfo
 from cidoc.llm.pricing import Price
 
 TOP_CONFUSIONS = 8
@@ -146,3 +147,84 @@ def render_estimate(
             )
     for note in notes:
         console.print(Text(note, style="dim"))
+
+
+def _metric(delta: MetricDelta, value: float | None) -> str:
+    if delta.key == "mean_cost":
+        return usd(value)
+    if delta.key.startswith("latency"):
+        return seconds(value)
+    if delta.key in ("failed", "blocked"):
+        return "—" if value is None else str(int(value))
+    return pct(value)
+
+
+def _delta(delta: MetricDelta) -> Text:
+    change = delta.delta
+    if change is None:
+        return Text("—", style="dim")
+    if delta.key == "mean_cost":
+        shown = f"{change:+.6f}"
+    elif delta.key.startswith("latency"):
+        shown = f"{change:+.2f}s"
+    elif delta.key in ("failed", "blocked"):
+        shown = f"{int(change):+d}"
+    else:
+        shown = f"{change * 100:+.1f} pts"
+    style = {True: "green", False: "red", None: "dim"}[delta.improved]
+    return Text(shown, style=style)
+
+
+def _run_label(run: RunFile) -> str:
+    version = run.info.prompt_version or "no prompt"
+    return f"{run.info.model} ({version}, {run.info.created_at[:16]})"
+
+
+def render_comparison(
+    console: Console, a: RunFile, b: RunFile, comparison: Comparison, max_rows: int = 50
+) -> None:
+    console.print(Text(f"A: {_run_label(a)}"))
+    console.print(Text(f"B: {_run_label(b)}"))
+    scope = f"{comparison.shared} shared items"
+    if comparison.recomputed:
+        scope += (
+            f"; metrics recomputed on those (only in A: {len(comparison.only_a)},"
+            f" only in B: {len(comparison.only_b)})"
+        )
+    console.print(Text(scope, style="dim"))
+    for note in comparison.notes:
+        console.print(Text(note, style="yellow"))
+
+    table = Table(title="metrics (Δ = B - A)", title_justify="left")
+    for column in ("metric", "A", "B", "Δ"):
+        table.add_column(column, justify="left" if column == "metric" else "right")
+    for delta in comparison.deltas:
+        table.add_row(delta.label, _metric(delta, delta.a), _metric(delta, delta.b), _delta(delta))
+    console.print(table)
+    console.print(
+        Text(
+            f"Both right {comparison.both_right}, only A right {comparison.only_a_right},"
+            f" only B right {comparison.only_b_right}, both wrong {comparison.both_wrong}."
+        )
+    )
+
+    if not comparison.disagreements:
+        console.print(Text("The runs agree on every shared item.", style="dim"))
+        return
+    rows = Table(
+        title=f"{len(comparison.disagreements)} items where A and B disagree",
+        title_justify="left",
+    )
+    for column in ("job", "label", "A", "B"):
+        rows.add_column(column)
+    for d in comparison.disagreements[:max_rows]:
+        rows.add_row(
+            str(d.job_id),
+            d.gold,
+            Text(d.a or FAILED, style="green" if d.a_correct else ""),
+            Text(d.b or FAILED, style="green" if d.b_correct else ""),
+        )
+    console.print(rows)
+    if len(comparison.disagreements) > max_rows:
+        hidden = len(comparison.disagreements) - max_rows
+        console.print(Text(f"({hidden} more not shown)", style="dim"))

@@ -26,9 +26,15 @@ from cidoc.analyze.prompt import GuidelineError, load_prompt
 from cidoc.config import MissingGeminiKeyError, get_settings
 from cidoc.db import DB_FILENAME, connect
 from cidoc.eval.baseline import REGEX_BASELINE, Predictor, RegexBaseline
-from cidoc.eval.display import render_estimate, render_item, render_summary
+from cidoc.eval.compare import compare_runs
+from cidoc.eval.display import (
+    render_comparison,
+    render_estimate,
+    render_item,
+    render_summary,
+)
 from cidoc.eval.metrics import compute_metrics
-from cidoc.eval.results import RunInfo, run_path, write_run
+from cidoc.eval.results import RunInfo, load_run, run_path, write_run
 from cidoc.eval.runner import LLMPredictor, load_cases, plan_run, run_eval
 from cidoc.github_client import GitHubClient
 from cidoc.labeling.labels import (
@@ -139,6 +145,14 @@ def eval_command(
         bool,
         typer.Option("--dry-run", help="Estimate tokens, cost and duration; make no API calls."),
     ] = False,
+    compare: Annotated[
+        tuple[Path, Path] | None,
+        typer.Option(
+            "--compare",
+            metavar="A.json B.json",
+            help="Compare two saved runs (metric deltas, disagreements) instead of running.",
+        ),
+    ] = None,
 ) -> None:
     """Score a model against the human labels and save the run to data/eval_runs/.
 
@@ -147,6 +161,15 @@ def eval_command(
     from the cache.
     """
     settings = get_settings()
+    if compare is not None:
+        try:
+            run_a, run_b = load_run(compare[0]), load_run(compare[1])
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            console.print(Text(f"cannot read run file: {exc}", style="red"))
+            raise typer.Exit(2) from None
+        comparison = compare_runs(run_a, run_b, settings.price_for)
+        render_comparison(console, run_a, run_b, comparison)
+        return
     try:
         prompt = load_prompt()
     except GuidelineError as exc:
