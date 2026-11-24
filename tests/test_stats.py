@@ -117,7 +117,7 @@ def test_pct_handles_zero() -> None:
 def test_stats_command(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("GITHUB_TOKEN", "test-github-token-value")
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-anthropic-key-value")
+    monkeypatch.setenv("GEMINI_API_KEY", "test-gemini-key-value")
     monkeypatch.setenv("DATA_DIR", str(tmp_path / "data"))
     get_settings.cache_clear()
     db = connect(tmp_path / "data" / DB_FILENAME)

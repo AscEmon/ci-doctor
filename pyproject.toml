@@ -7,7 +7,7 @@ authors = [
 ]
 requires-python = ">=3.12"
 dependencies = [
-    "anthropic",
+    "google-genai>=3.6.1",
     "httpx",
     "pydantic",
     "pydantic-settings",

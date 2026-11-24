@@ -368,7 +368,7 @@ def test_label_command_resumes(
 ) -> None:
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("GITHUB_TOKEN", "test-github-token-value")
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-anthropic-key-value")
+    monkeypatch.setenv("GEMINI_API_KEY", "test-gemini-key-value")
     monkeypatch.setenv("DATA_DIR", str(tmp_path / "data"))
     get_settings.cache_clear()
     keys = iter("4" + "2" + "q")
