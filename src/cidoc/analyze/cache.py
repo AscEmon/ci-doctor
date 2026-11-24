@@ -46,6 +46,7 @@ def result_to_dict(result: AnalysisResult) -> dict[str, Any]:
         "diagnosis": result.diagnosis.model_dump() if result.diagnosis else None,
         "failure": result.failure,
         "calls": [asdict(call) for call in result.calls],
+        "outputs": result.outputs,
     }
 
 
@@ -56,6 +57,7 @@ def result_from_dict(data: dict[str, Any]) -> AnalysisResult:
         diagnosis=Diagnosis.model_validate(diagnosis) if diagnosis is not None else None,
         failure=data["failure"],
         calls=[Usage(**call) for call in data["calls"]],
+        outputs=list(data.get("outputs", [])),  # absent in entries cached before they were kept
     )
 
 

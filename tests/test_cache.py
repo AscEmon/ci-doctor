@@ -1,3 +1,4 @@
+import json
 from dataclasses import replace
 from io import StringIO
 from pathlib import Path
@@ -183,3 +184,27 @@ def test_cached_usage_says_no_call_was_made() -> None:
 
     assert "cached: no API call, $0 this run" in out
     assert "1234 in" in out
+
+
+def test_raw_outputs_are_cached(cache: ResponseCache) -> None:
+    provider = ScriptedProvider(ok("garbage"), ok(VALID_DIAGNOSIS))
+    first = analyze_cached(provider, log(), PROMPT, cache)
+
+    again = analyze_cached(provider, log(), PROMPT, cache)
+
+    assert first.outputs == ["garbage", again.outputs[1]]
+    assert again.cached
+    assert again.outputs == first.outputs
+
+
+def test_entries_cached_before_outputs_were_kept_still_load(cache: ResponseCache) -> None:
+    analyze_cached(ScriptedProvider(ok(VALID_DIAGNOSIS)), log(), PROMPT, cache)
+    [entry] = list(cache.directory.glob("*.json"))
+    data = json.loads(entry.read_text(encoding="utf-8"))
+    del data["result"]["outputs"]
+    entry.write_text(json.dumps(data), encoding="utf-8")
+
+    result = analyze_cached(ScriptedProvider(), log(), PROMPT, cache)
+
+    assert result.cached
+    assert result.outputs == []

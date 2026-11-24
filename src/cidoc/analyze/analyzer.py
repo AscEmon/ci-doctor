@@ -6,7 +6,7 @@ carries no diagnosis and the reason why. API errors (after the provider's own ba
 propagate: they say nothing about the log.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from pydantic import ValidationError
 
@@ -30,6 +30,8 @@ class AnalysisResult:
     """Why there is no diagnosis (from the last attempt); None on success."""
     calls: list[Usage]
     """Every API call made for this result (the first and, if needed, the retry)."""
+    outputs: list[str] = field(default_factory=list)
+    """The model's raw text for each call, for inspection (may be invalid or empty)."""
     cached: bool = False
     """Read from the response cache: no call was made this time."""
 
@@ -81,15 +83,17 @@ def retry_prompt(prompt: str, error: str) -> str:
 def analyze_log(provider: LLMProvider, log: PreprocessedLog, prompt: Prompt) -> AnalysisResult:
     user = prompt.user(log)
     calls: list[Usage] = []
+    outputs: list[str] = []
     error = ""
     for attempt in range(MAX_ATTEMPTS):
         text = user if attempt == 0 else retry_prompt(user, error)
         response = provider.generate_structured(prompt.system, text, RESPONSE_SCHEMA)
         calls.append(response.usage)
+        outputs.append(response.text)
         try:
             diagnosis = parse_response(response, log.total_lines)
         except InvalidResponseError as exc:
             error = str(exc)
             continue
-        return AnalysisResult(provider.model, diagnosis, None, calls)
-    return AnalysisResult(provider.model, None, error, calls)
+        return AnalysisResult(provider.model, diagnosis, None, calls, outputs)
+    return AnalysisResult(provider.model, None, error, calls, outputs)

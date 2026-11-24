@@ -8,6 +8,9 @@ from rich.table import Table
 from rich.text import Text
 
 from cidoc.analyze.analyzer import AnalysisResult
+from cidoc.analyze.costguard import EXPECTED_OUTPUT_TOKENS
+from cidoc.analyze.preprocess import PreprocessedLog, estimate_tokens
+from cidoc.analyze.prompt import Prompt
 from cidoc.analyze.usage import summarize
 from cidoc.llm.pricing import Price
 
@@ -82,3 +85,44 @@ def render_usage(console: Console, result: AnalysisResult, price: Price | None) 
         console.print(
             Text(f"No price configured for {result.model}: set CIDOC_PRICES.", style="dim")
         )
+
+
+def render_input(console: Console, prompt: Prompt, log: PreprocessedLog, model: str) -> None:
+    """Exactly what is sent: the system instruction, then the user message with the log."""
+    user = prompt.user(log)
+    system_tokens, user_tokens = estimate_tokens(prompt.system), estimate_tokens(user)
+    console.rule(f"system instruction (~{system_tokens} tokens)", style="cyan")
+    # soft_wrap: no inserted line breaks, so copied text is exactly what was sent.
+    console.print(Text(prompt.system), soft_wrap=True, highlight=False)
+    console.rule(
+        f"user message (~{user_tokens} tokens; log excerpt ~{log.estimated_tokens}"
+        f" of {log.budget_tokens} budget)",
+        style="cyan",
+    )
+    console.print(Text(user), soft_wrap=True, highlight=False)
+    console.rule(style="cyan")
+    console.print(
+        Text(
+            f"Input ~{system_tokens + user_tokens} tokens (4 chars per token) to {model},"
+            f" prompt {prompt.version}; output allowance {EXPECTED_OUTPUT_TOKENS}."
+            " A retry resends the user message with the rejection reason appended.",
+            style="dim",
+        )
+    )
+
+
+def render_outputs(console: Console, result: AnalysisResult) -> None:
+    """The model's raw text for each call, before validation."""
+    if not result.outputs:
+        note = "(no raw output"
+        if result.cached:
+            note += ": this result was cached before raw outputs were kept; use --refresh"
+        console.print(Text(note + ")", style="dim"))
+        return
+    for n, output in enumerate(result.outputs, start=1):
+        title = "model output" if len(result.outputs) == 1 else f"model output, call {n}"
+        if result.cached:
+            title += " (cached)"
+        console.rule(title, style="magenta")
+        console.print(Text(output or "(empty)"), soft_wrap=True, highlight=False)
+    console.rule(style="magenta")

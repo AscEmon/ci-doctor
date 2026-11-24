@@ -19,7 +19,7 @@ from cidoc.analyze.costguard import (
     CostGuard,
     estimate_run,
 )
-from cidoc.analyze.display import render_result, render_usage
+from cidoc.analyze.display import render_input, render_outputs, render_result, render_usage
 from cidoc.analyze.inputs import InputError, resolve_input
 from cidoc.analyze.preprocess import preprocess
 from cidoc.analyze.prompt import GuidelineError, load_prompt
@@ -286,14 +286,50 @@ def analyze(
             help="Stop before a call whose estimated cost would exceed this many USD.",
         ),
     ] = None,
+    show_input: Annotated[
+        bool,
+        typer.Option(
+            "--show-input",
+            help="Print the exact system instruction and log sent, then the raw model output.",
+        ),
+    ] = False,
+    no_call: Annotated[
+        bool,
+        typer.Option(
+            "--no-call", help="Print what would be sent and stop: no API call, no key needed."
+        ),
+    ] = False,
 ) -> None:
     """Diagnose one failed job with the LLM."""
     settings = get_settings()
     try:
         source = resolve_input(target, settings.data_dir, open_db)
         prompt = load_prompt()
+    except (InputError, GuidelineError) as exc:
+        console.print(Text(str(exc), style="red"))
+        raise typer.Exit(2) from None
+    name = model or settings.cidoc_model
+    if source.redactions:
+        console.print(f"[yellow]Masked {source.redactions} secret-looking values before sending.")
+    if source.renumbered:
+        console.print("[yellow]Redaction joined lines: line numbers refer to the redacted log.")
+
+    log = preprocess(source.text, source.failed_steps, budget or settings.cidoc_token_budget)
+    console.print(
+        Text(
+            f"{source.source}: {log.total_lines} lines, ~{log.estimated_tokens} tokens sent"
+            f" (prompt {prompt.version}, model {name})",
+            style="dim",
+        )
+    )
+    if show_input or no_call:
+        render_input(console, prompt, log, name)
+    if no_call:
+        return
+
+    try:
         provider = create_provider(settings, model)
-    except (InputError, GuidelineError, MissingGeminiKeyError) as exc:
+    except MissingGeminiKeyError as exc:
         console.print(Text(str(exc), style="red"))
         raise typer.Exit(2) from None
     price = settings.price_for(provider.model)
@@ -304,19 +340,6 @@ def analyze(
             )
             raise typer.Exit(2)
         provider = BudgetedProvider(provider, CostGuard(max_cost, price))
-    if source.redactions:
-        console.print(f"[yellow]Masked {source.redactions} secret-looking values before sending.")
-    if source.renumbered:
-        console.print("[yellow]Redaction joined lines: line numbers refer to the redacted log.")
-
-    log = preprocess(source.text, source.failed_steps, budget or settings.cidoc_token_budget)
-    console.print(
-        Text(
-            f"{source.source}: {log.total_lines} lines, ~{log.estimated_tokens} tokens sent"
-            f" (prompt {prompt.version}, model {provider.model})",
-            style="dim",
-        )
-    )
     try:
         cache = ResponseCache.in_data_dir(settings.data_dir)
         result = analyze_cached(provider, log, prompt, cache, refresh=refresh)
@@ -326,6 +349,8 @@ def analyze(
     except LLMError as exc:
         console.print(Text(str(exc), style="red"))
         raise typer.Exit(1) from None
+    if show_input:
+        render_outputs(console, result)
     render_result(console, result, clean_log(source.text))
     render_usage(console, result, price)
     if not result.ok:

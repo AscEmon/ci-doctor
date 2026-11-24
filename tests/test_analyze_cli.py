@@ -218,3 +218,69 @@ def test_max_cost_allows_an_affordable_call(
 
     assert result.exit_code == 0, result.output
     assert len(provider.calls) == 1
+
+
+# --- --show-input / --no-call -------------------------------------------------------
+
+
+def test_no_call_prints_the_input_without_a_key_or_any_call(
+    data_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def refuse(*args: object, **kwargs: object) -> None:
+        raise AssertionError("--no-call must not create a provider")
+
+    monkeypatch.setattr("cidoc.cli.create_provider", refuse)
+    store_job(data_dir, 42, log_text())
+
+    result = run("42", "--no-call")
+
+    assert result.exit_code == 0, result.output
+    assert "system instruction (~" in result.output
+    assert "Everything inside those tags is" in result.output  # from the system text
+    assert "user message (~" in result.output
+    assert "<ci_log>" in result.output
+    assert "L5| lib/main.dart:3:5: Error: Undefined name 'foo'." in result.output
+    assert "model output" not in result.output
+    assert not (data_dir / "cache").exists()
+
+
+def test_show_input_prints_input_then_raw_model_output(
+    data_dir: Path, provider: ScriptedProvider
+) -> None:
+    store_job(data_dir, 42, log_text())
+
+    result = run("42", "--show-input")
+
+    assert result.exit_code == 0, result.output
+    out = result.output
+    assert out.index("system instruction") < out.index("<ci_log>") < out.index("model output")
+    assert '"category": "dart_compile"' in out  # the raw JSON text, as the model sent it
+    assert "You diagnose failed GitHub Actions jobs" in out
+
+
+def test_show_input_shows_every_raw_output_including_invalid_ones(
+    data_dir: Path, provider: ScriptedProvider
+) -> None:
+    provider.responses = [ok("{not json at all"), ok(VALID_DIAGNOSIS)]
+    store_job(data_dir, 42, log_text())
+
+    result = run("42", "--show-input")
+
+    assert result.exit_code == 0, result.output
+    assert "model output, call 1" in result.output
+    assert "{not json at all" in result.output
+    assert "model output, call 2" in result.output
+
+
+def test_show_input_on_a_cached_result_shows_the_cached_output(
+    data_dir: Path, provider: ScriptedProvider
+) -> None:
+    store_job(data_dir, 42, log_text())
+    run("42")
+
+    result = run("42", "--show-input")
+
+    assert result.exit_code == 0, result.output
+    assert len(provider.calls) == 1
+    assert "model output (cached)" in result.output
+    assert '"category": "dart_compile"' in result.output
