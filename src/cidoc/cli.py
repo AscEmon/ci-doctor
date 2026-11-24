@@ -31,7 +31,9 @@ from cidoc.eval.display import (
     render_comparison,
     render_estimate,
     render_item,
+    render_items,
     render_summary,
+    select_items,
 )
 from cidoc.eval.metrics import compute_metrics
 from cidoc.eval.results import RunInfo, load_run, run_path, write_run
@@ -153,6 +155,18 @@ def eval_command(
             help="Compare two saved runs (metric deltas, disagreements) instead of running.",
         ),
     ] = None,
+    show: Annotated[
+        Path | None,
+        typer.Option(
+            "--show",
+            metavar="RUN.json",
+            help="Print a saved run item by item (label next to prediction) instead of running.",
+        ),
+    ] = None,
+    wrong: Annotated[
+        bool, typer.Option("--wrong", help="With --show: only items predicted wrong.")
+    ] = False,
+    job: Annotated[int | None, typer.Option("--job", help="With --show: only this job id.")] = None,
 ) -> None:
     """Score a model against the human labels and save the run to data/eval_runs/.
 
@@ -162,6 +176,37 @@ def eval_command(
     scored. Exit code 1 if anything was not scored, 130 after Ctrl-C.
     """
     settings = get_settings()
+    if show is not None and compare is not None:
+        console.print("[red]Use --show or --compare, not both.[/red]")
+        raise typer.Exit(2)
+    if (wrong or job is not None) and show is None:
+        console.print("[red]--wrong and --job only apply to --show.[/red]")
+        raise typer.Exit(2)
+    if show is not None:
+        try:
+            saved = load_run(show)
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            console.print(Text(f"cannot read run file: {exc}", style="red"))
+            raise typer.Exit(2) from None
+        if job is not None and all(item.job_id != job for item in saved.items):
+            console.print(Text(f"job {job} is not in {show}", style="red"))
+            raise typer.Exit(2)
+        items = select_items(saved.items, wrong, job)
+        root_causes = {
+            label.job_id: label.root_cause
+            for label in load_labels(settings.data_dir / LABELS_FILENAME)
+        }
+        render_items(console, saved, items, root_causes)
+        unscored = sum(item.error is not None for item in saved.items)
+        wrong_total = sum(item.error is None and not item.correct for item in saved.items)
+        console.print(
+            Text(
+                f"Showing {len(items)} of {len(saved.items)} items"
+                f" ({wrong_total} wrong, {unscored} not scored).",
+                style="dim",
+            )
+        )
+        return
     if compare is not None:
         try:
             run_a, run_b = load_run(compare[0]), load_run(compare[1])

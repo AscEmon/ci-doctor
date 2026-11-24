@@ -420,3 +420,115 @@ def test_baseline_ignores_max_cost(data_dir: Path) -> None:
     result = run("--model", "regex-baseline", "--max-cost", "0")
 
     assert result.exit_code == 0, result.output
+
+
+# --- --show -------------------------------------------------------------------------
+
+
+def scored_run(data_dir: Path, provider: ScriptedProvider) -> Path:
+    """Jobs 1 and 2 right (dart_compile), job 3 wrong (dart_compile for a pub failure)."""
+    setup_jobs(data_dir)
+    provider.responses = [ok(VALID_DIAGNOSIS) for _ in range(3)]
+    run("--model", "fake-model")
+    return run_files(data_dir)[-1]
+
+
+def show(*args: str) -> Any:
+    return CliRunner().invoke(app, ["eval", "--show", *args])
+
+
+def test_show_prints_label_next_to_prediction(data_dir: Path, provider: ScriptedProvider) -> None:
+    path = scored_run(data_dir, provider)
+
+    result = show(str(path))
+
+    assert result.exit_code == 0, result.output
+    out = result.output
+    for job_id in (1, 2, 3):
+        assert f"job {job_id}  " in out
+    assert "label dependency_resolution (confidence 2)  →  dart_compile (0.90)" in out
+    assert "label dart_compile (confidence 3)  →  dart_compile (0.90)" in out
+    assert "human:     cause" in out  # stored in the run file
+    assert "from current labels.jsonl" not in out
+    assert f"predicted: {VALID_DIAGNOSIS['root_cause']}" in out
+    assert "evidence:  predicted [5]  human [5]" in out
+    assert "Showing 3 of 3 items (1 wrong, 0 not scored)." in out
+
+
+def test_show_wrong_only(data_dir: Path, provider: ScriptedProvider) -> None:
+    path = scored_run(data_dir, provider)
+
+    result = show(str(path), "--wrong")
+
+    assert result.exit_code == 0, result.output
+    assert "job 3  " in result.output
+    assert "job 1  " not in result.output
+    assert "job 2  " not in result.output
+    assert "Showing 1 of 3 items" in result.output
+
+
+def test_show_one_job(data_dir: Path, provider: ScriptedProvider) -> None:
+    path = scored_run(data_dir, provider)
+
+    result = show(str(path), "--job", "2")
+
+    assert result.exit_code == 0, result.output
+    assert "job 2  " in result.output
+    assert "job 1  " not in result.output
+    assert "job 3  " not in result.output
+
+
+def test_show_unknown_job_exits_2(data_dir: Path, provider: ScriptedProvider) -> None:
+    path = scored_run(data_dir, provider)
+
+    result = show(str(path), "--job", "999")
+
+    assert result.exit_code == 2
+    assert "job 999 is not in" in result.output
+
+
+def test_show_failed_and_errored_items(data_dir: Path, provider: ScriptedProvider) -> None:
+    setup_jobs(data_dir)
+    provider.responses = [ok("bad"), ok("bad"), LLMError("boom"), ok(VALID_DIAGNOSIS)]
+    run("--model", "fake-model")
+    path = run_files(data_dir)[-1]
+
+    everything = show(str(path))
+    wrong = show(str(path), "--wrong")
+
+    assert "→  failed: invalid JSON" in everything.output  # job 1: counts as wrong
+    assert "→  not scored: LLMError: boom" in everything.output  # job 2
+    assert "job 1  " in wrong.output
+    assert "job 2  " not in wrong.output  # never scored, so not "wrong"
+    assert "(2 wrong, 1 not scored)" in wrong.output
+
+
+def test_show_old_run_file_falls_back_to_labels(data_dir: Path, provider: ScriptedProvider) -> None:
+    path = scored_run(data_dir, provider)
+    data = json.loads(path.read_text(encoding="utf-8"))
+    for saved in data["items"]:
+        del saved["gold_root_cause"]
+    path.write_text(json.dumps(data), encoding="utf-8")
+
+    result = show(str(path), "--job", "1")
+
+    assert result.exit_code == 0, result.output
+    assert "human:     cause  (from current labels.jsonl)" in result.output
+
+
+@pytest.mark.parametrize(
+    "args",
+    [["--wrong"], ["--job", "1"], ["--show", "a.json", "--compare", "a.json", "b.json"]],
+)
+def test_show_option_misuse_exits_2(data_dir: Path, args: list[str]) -> None:
+    result = run(*args)
+
+    assert result.exit_code == 2
+    assert "--show" in result.output
+
+
+def test_show_bad_file_exits_2(data_dir: Path) -> None:
+    result = show("missing.json")
+
+    assert result.exit_code == 2
+    assert "cannot read run file" in result.output

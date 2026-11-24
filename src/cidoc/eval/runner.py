@@ -135,6 +135,7 @@ def to_item(case: EvalCase, result: AnalysisResult, error: str | None = None) ->
         gold_evidence=list(case.label.evidence_lines),
         result=result,
         error=error,
+        gold_root_cause=case.label.root_cause,
     )
 
 

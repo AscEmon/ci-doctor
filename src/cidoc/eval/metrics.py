@@ -35,6 +35,8 @@ class EvalItem:
     result: AnalysisResult
     error: str | None = None
     """The API failed after retries ("ErrorType: message"): not scored."""
+    gold_root_cause: str | None = None
+    """The labeler's root cause (for display; not used by any metric)."""
 
     @property
     def predicted(self) -> str | None:

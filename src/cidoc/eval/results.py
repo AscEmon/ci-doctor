@@ -57,6 +57,7 @@ def item_to_dict(item: EvalItem) -> dict[str, Any]:
         "gold": item.gold,
         "gold_confidence": item.gold_confidence,
         "gold_evidence": item.gold_evidence,
+        "gold_root_cause": item.gold_root_cause,
         "predicted": item.predicted,
         "correct": item.correct,
         "cached": item.result.cached,
@@ -74,6 +75,7 @@ def item_from_dict(data: dict[str, Any]) -> EvalItem:
         gold_evidence=list(data["gold_evidence"]),
         result=result,
         error=data.get("error"),  # absent in runs saved before errored items existed
+        gold_root_cause=data.get("gold_root_cause"),  # absent in runs saved before 3b
     )
 
 

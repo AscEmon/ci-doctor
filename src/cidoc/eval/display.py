@@ -235,3 +235,66 @@ def render_comparison(
     if len(comparison.disagreements) > max_rows:
         hidden = len(comparison.disagreements) - max_rows
         console.print(Text(f"({hidden} more not shown)", style="dim"))
+
+
+def select_items(items: list[EvalItem], wrong: bool, job: int | None) -> list[EvalItem]:
+    """--job keeps one job; --wrong keeps scored items that are not correct (an
+    item that errored was never scored, so it is neither right nor wrong)."""
+    selected = [item for item in items if job is None or item.job_id == job]
+    if wrong:
+        selected = [item for item in selected if item.error is None and not item.correct]
+    return selected
+
+
+def render_items(
+    console: Console,
+    run: RunFile,
+    items: list[EvalItem],
+    fallback_root_causes: dict[int, str],
+) -> None:
+    """One block per item: the human label next to the prediction.
+
+    `fallback_root_causes` (from labels.jsonl) fills in the human root cause for runs
+    saved before run files stored it; such causes are marked as possibly newer.
+    """
+    console.print(Text(f"{_run_label(run)}", style="bold"))
+    for item in items:
+        diagnosis = item.result.diagnosis
+        if item.error is not None:
+            mark, mark_style = "!", "yellow"
+        elif item.correct:
+            mark, mark_style = "✓", "green"
+        else:
+            mark, mark_style = "✗", "red"
+        header = Text(f"job {item.job_id}  ")
+        header.append(mark, style=mark_style)
+        header.append(f"  label {item.gold} (confidence {item.gold_confidence})  →  ")
+        if item.error is not None:
+            header.append(f"not scored: {item.error}", style="yellow")
+        elif diagnosis is None:
+            header.append(f"failed: {item.result.failure}", style="red")
+        else:
+            header.append(f"{diagnosis.category} ({diagnosis.confidence:.2f})", style="bold")
+        console.rule(style="dim")
+        console.print(header, soft_wrap=True, highlight=False)
+
+        human = item.gold_root_cause
+        note = ""
+        if human is None and item.job_id in fallback_root_causes:
+            human, note = fallback_root_causes[item.job_id], "  (from current labels.jsonl)"
+        rows = [
+            ("human", human or "(not recorded)", note),
+            ("predicted", diagnosis.root_cause if diagnosis else "—", ""),
+            (
+                "evidence",
+                f"predicted {diagnosis.evidence_lines if diagnosis else []}"
+                f"  human {item.gold_evidence}",
+                "",
+            ),
+        ]
+        for name, value, row_note in rows:
+            row = Text(f"  {name + ':':<11}", style="dim")
+            row.append(value)
+            row.append(row_note, style="dim")
+            console.print(row, soft_wrap=True, highlight=False)
+    console.rule(style="dim")
