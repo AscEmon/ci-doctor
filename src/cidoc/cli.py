@@ -13,6 +13,7 @@ from rich.table import Table
 from rich.text import Text
 
 from cidoc.analyze.cache import ResponseCache, analyze_cached
+from cidoc.analyze.costguard import BudgetedProvider, BudgetExceededError, CostGuard
 from cidoc.analyze.display import render_result, render_usage
 from cidoc.analyze.inputs import InputError, resolve_input
 from cidoc.analyze.preprocess import preprocess
@@ -119,6 +120,14 @@ def analyze(
     refresh: Annotated[
         bool, typer.Option("--refresh", help="Ignore a cached result and call the API again.")
     ] = False,
+    max_cost: Annotated[
+        float | None,
+        typer.Option(
+            "--max-cost",
+            min=0,
+            help="Stop before a call whose estimated cost would exceed this many USD.",
+        ),
+    ] = None,
 ) -> None:
     """Diagnose one failed job with the LLM."""
     settings = get_settings()
@@ -129,6 +138,14 @@ def analyze(
     except (InputError, GuidelineError, MissingGeminiKeyError) as exc:
         console.print(Text(str(exc), style="red"))
         raise typer.Exit(2) from None
+    price = settings.price_for(provider.model)
+    if max_cost is not None:
+        if price is None:
+            console.print(
+                Text(f"--max-cost needs a price for {provider.model}: set CIDOC_PRICES.", "red")
+            )
+            raise typer.Exit(2)
+        provider = BudgetedProvider(provider, CostGuard(max_cost, price))
     if source.redactions:
         console.print(f"[yellow]Masked {source.redactions} secret-looking values before sending.")
     if source.renumbered:
@@ -145,11 +162,14 @@ def analyze(
     try:
         cache = ResponseCache.in_data_dir(settings.data_dir)
         result = analyze_cached(provider, log, prompt, cache, refresh=refresh)
+    except BudgetExceededError as exc:
+        console.print(Text(f"Stopped: {exc}", style="yellow"))
+        raise typer.Exit(1) from None
     except LLMError as exc:
         console.print(Text(str(exc), style="red"))
         raise typer.Exit(1) from None
     render_result(console, result, clean_log(source.text))
-    render_usage(console, result, settings.price_for(provider.model))
+    render_usage(console, result, price)
     if not result.ok:
         raise typer.Exit(1)
 

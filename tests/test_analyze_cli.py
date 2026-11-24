@@ -253,3 +253,40 @@ def test_refresh_bypasses_the_cache(data_dir: Path, provider: ScriptedProvider) 
     assert result.exit_code == 0, result.output
     assert len(provider.calls) == 2
     assert "cached" not in result.output
+
+
+def test_max_cost_needs_a_price(data_dir: Path, provider: ScriptedProvider) -> None:
+    store_job(data_dir, 42, log_text())
+
+    result = run("42", "--max-cost", "1")
+
+    assert result.exit_code == 2
+    assert "--max-cost needs a price for fake-model" in result.output
+    assert provider.calls == []
+
+
+def test_max_cost_stops_before_an_expensive_call(
+    data_dir: Path, provider: ScriptedProvider, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("CIDOC_PRICES", '{"fake-model": {"input": 0.1, "output": 0.4}}')
+    get_settings.cache_clear()
+    store_job(data_dir, 42, log_text())
+
+    result = run("42", "--max-cost", "0.0000001")
+
+    assert result.exit_code == 1
+    assert "Stopped: next call" in result.output
+    assert provider.calls == []
+
+
+def test_max_cost_allows_an_affordable_call(
+    data_dir: Path, provider: ScriptedProvider, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("CIDOC_PRICES", '{"fake-model": {"input": 0.1, "output": 0.4}}')
+    get_settings.cache_clear()
+    store_job(data_dir, 42, log_text())
+
+    result = run("42", "--max-cost", "0.01")
+
+    assert result.exit_code == 0, result.output
+    assert len(provider.calls) == 1
