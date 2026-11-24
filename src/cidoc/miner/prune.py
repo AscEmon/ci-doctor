@@ -13,7 +13,7 @@ from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 
-from cidoc.labeling.display import failed_step_lines, read_log
+from cidoc.logview import failed_step_lines, read_log
 from cidoc.miner.rules import (
     JobFacts,
     RepoExcludes,

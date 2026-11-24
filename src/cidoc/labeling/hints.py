@@ -14,7 +14,7 @@ import re
 from collections.abc import Iterable
 from dataclasses import dataclass
 
-from cidoc.labeling.display import (
+from cidoc.logview import (
     NON_ERROR_MARKERS,
     FocusView,
     clean_log,

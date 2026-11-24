@@ -5,7 +5,10 @@ from pathlib import Path
 import pytest
 from rich.console import Console
 
-from cidoc.labeling.display import (
+from cidoc.labeling.display import render_focus_view
+from cidoc.labeling.hints import hint_for_log
+from cidoc.labeling.session import Candidate, ViewToggle, label_one
+from cidoc.logview import (
     FULL_STEP_MAX_LINES,
     LINES_BEFORE_ERROR,
     build_focus_view,
@@ -15,12 +18,9 @@ from cidoc.labeling.display import (
     hidden_action_lines,
     is_marker,
     read_log,
-    render_focus_view,
     split_steps,
     visible_line_numbers,
 )
-from cidoc.labeling.hints import hint_for_log
-from cidoc.labeling.session import Candidate, ViewToggle, label_one
 
 TS = "2026-10-01T12:34:56.1234567Z "
 NOW = datetime(2026, 10, 31, tzinfo=UTC)

@@ -4,14 +4,14 @@ from pathlib import Path
 import pytest
 from rich.console import Console
 
-from cidoc.labeling.display import (
+from cidoc.labeling.display import render_view
+from cidoc.logview import (
     build_view,
     clean_line,
     clean_log,
     is_marker,
     marker_windows,
     read_log,
-    render_view,
 )
 
 TS = "2026-10-01T12:34:56.1234567Z "

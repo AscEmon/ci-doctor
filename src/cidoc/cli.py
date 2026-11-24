@@ -15,7 +15,6 @@ from rich.text import Text
 from cidoc.config import get_settings
 from cidoc.db import DB_FILENAME, connect
 from cidoc.github_client import GitHubClient
-from cidoc.labeling.display import build_focus_view, build_view, read_log
 from cidoc.labeling.labels import (
     LABELS_FILENAME,
     LabelNotFoundError,
@@ -36,6 +35,7 @@ from cidoc.labeling.session import (
     render_header,
     run_session,
 )
+from cidoc.logview import build_focus_view, build_view, read_log
 from cidoc.miner.discover import RepoInfo, discover
 from cidoc.miner.prune import apply_prune, plan_prune
 from cidoc.miner.redaction_report import (

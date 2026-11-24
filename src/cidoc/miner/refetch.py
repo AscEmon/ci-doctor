@@ -20,7 +20,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from cidoc.github_client import GitHubClient
-from cidoc.labeling.display import read_log
+from cidoc.logview import read_log
 from cidoc.miner.redaction_report import LogText
 from cidoc.miner.runs import download_job_log, redact_log, store_log
 from cidoc.redact import MASK_RE, REDACTOR_VERSION

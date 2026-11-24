@@ -14,7 +14,7 @@ from typing import Any
 import httpx
 
 from cidoc.github_client import GitHubClient
-from cidoc.labeling.display import failed_step_lines
+from cidoc.logview import failed_step_lines
 from cidoc.miner.fixpair import FixPairFinder
 from cidoc.miner.rules import JobFacts, is_fork_run, job_skip_reason, run_skip_reason
 from cidoc.redact import REDACTOR_VERSION, Redaction, redact

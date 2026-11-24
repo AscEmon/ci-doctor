@@ -12,15 +12,7 @@ from pathlib import Path
 from rich.console import Console
 from rich.text import Text
 
-from cidoc.labeling.display import (
-    FocusView,
-    LogView,
-    build_focus_view,
-    build_view,
-    read_log,
-    render_focus_view,
-    render_view,
-)
+from cidoc.labeling.display import render_focus_view, render_view
 from cidoc.labeling.hints import Hint, hint_for_log
 from cidoc.labeling.labels import (
     CATEGORY_HINTS,
@@ -30,6 +22,7 @@ from cidoc.labeling.labels import (
     append_label,
     parse_evidence,
 )
+from cidoc.logview import FocusView, LogView, build_focus_view, build_view, read_log
 
 SKIP_KEY = "s"
 TOGGLE_VIEW_KEY = "f"

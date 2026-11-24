@@ -14,7 +14,7 @@ from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, replace
 from pathlib import Path
 
-from cidoc.labeling.display import clean_log, read_log
+from cidoc.logview import clean_log, read_log
 from cidoc.redact import MASK_RE, RULE_NAMES, redact
 
 EXAMPLES_PER_RULE = 10

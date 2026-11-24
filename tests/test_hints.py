@@ -6,10 +6,10 @@ from pathlib import Path
 import pytest
 from rich.console import Console
 
-from cidoc.labeling.display import build_focus_view, clean_log
 from cidoc.labeling.hints import RULES, Hint, find_hint, hint_for_log
 from cidoc.labeling.labels import Label, load_labels
 from cidoc.labeling.session import Candidate, label_one
+from cidoc.logview import build_focus_view, clean_log
 
 NOW = datetime(2026, 10, 31, tzinfo=UTC)
 TS = "2026-10-01T12:34:56.1234567Z "
