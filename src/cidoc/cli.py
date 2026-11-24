@@ -12,7 +12,12 @@ from rich.console import Console
 from rich.table import Table
 from rich.text import Text
 
-from cidoc.config import get_settings
+from cidoc.analyze.analyzer import analyze_log
+from cidoc.analyze.display import render_result
+from cidoc.analyze.inputs import InputError, resolve_input
+from cidoc.analyze.preprocess import preprocess
+from cidoc.analyze.prompt import GuidelineError, load_prompt
+from cidoc.config import MissingGeminiKeyError, get_settings
 from cidoc.db import DB_FILENAME, connect
 from cidoc.github_client import GitHubClient
 from cidoc.labeling.labels import (
@@ -35,7 +40,9 @@ from cidoc.labeling.session import (
     render_header,
     run_session,
 )
-from cidoc.logview import build_focus_view, build_view, read_log
+from cidoc.llm.base import LLMError
+from cidoc.llm.factory import create_provider
+from cidoc.logview import build_focus_view, build_view, clean_log, read_log
 from cidoc.miner.discover import RepoInfo, discover
 from cidoc.miner.prune import apply_prune, plan_prune
 from cidoc.miner.redaction_report import (
@@ -95,6 +102,51 @@ def main() -> None:
 def show_version() -> None:
     """Print the installed ci-doctor version."""
     console.print(version("ci-doctor"))
+
+
+@app.command("analyze")
+def analyze(
+    target: Annotated[
+        str, typer.Argument(help="A job log file (.log.gz or text), or a stored job id.")
+    ],
+    model: Annotated[
+        str | None, typer.Option(help="LLM model to use (default: CIDOC_MODEL).")
+    ] = None,
+    budget: Annotated[
+        int | None,
+        typer.Option(min=1, help="Token budget for the log excerpt (default: CIDOC_TOKEN_BUDGET)."),
+    ] = None,
+) -> None:
+    """Diagnose one failed job with the LLM."""
+    settings = get_settings()
+    try:
+        source = resolve_input(target, settings.data_dir, open_db)
+        prompt = load_prompt()
+        provider = create_provider(settings, model)
+    except (InputError, GuidelineError, MissingGeminiKeyError) as exc:
+        console.print(Text(str(exc), style="red"))
+        raise typer.Exit(2) from None
+    if source.redactions:
+        console.print(f"[yellow]Masked {source.redactions} secret-looking values before sending.")
+    if source.renumbered:
+        console.print("[yellow]Redaction joined lines: line numbers refer to the redacted log.")
+
+    log = preprocess(source.text, source.failed_steps, budget or settings.cidoc_token_budget)
+    console.print(
+        Text(
+            f"{source.source}: {log.total_lines} lines, ~{log.estimated_tokens} tokens sent"
+            f" (prompt {prompt.version}, model {provider.model})",
+            style="dim",
+        )
+    )
+    try:
+        result = analyze_log(provider, log, prompt)
+    except LLMError as exc:
+        console.print(Text(str(exc), style="red"))
+        raise typer.Exit(1) from None
+    render_result(console, result, clean_log(source.text))
+    if not result.ok:
+        raise typer.Exit(1)
 
 
 @mine_app.command("discover")

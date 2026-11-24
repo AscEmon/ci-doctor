@@ -1,6 +1,3 @@
-import json
-from typing import Any
-
 import pytest
 
 from cidoc.analyze.analyzer import MAX_ATTEMPTS, analyze_log
@@ -9,17 +6,11 @@ from cidoc.analyze.prompt import load_prompt
 from cidoc.analyze.schema import RESPONSE_SCHEMA, ROOT_CAUSE_MAX_CHARS, Diagnosis
 from cidoc.labeling.labels import CATEGORIES
 from cidoc.llm.base import LLMError, StructuredResponse, Usage
+from tests.fakes import VALID_DIAGNOSIS as VALID
+from tests.fakes import ScriptedProvider, ok
 
 TS = "2026-10-01T12:34:56.1234567Z "
 PROMPT = load_prompt()
-
-VALID: dict[str, Any] = {
-    "category": "dart_compile",
-    "root_cause": "lib/main.dart references an undefined name 'foo'.",
-    "evidence_lines": [5],
-    "suggested_fix": "Define or import 'foo' in lib/main.dart.",
-    "confidence": 0.9,
-}
 
 
 def log() -> PreprocessedLog:
@@ -35,37 +26,6 @@ def log() -> PreprocessedLog:
         )
     )
     return preprocess(text)
-
-
-def ok(data: dict[str, Any] | str, **kw: Any) -> StructuredResponse:
-    text = data if isinstance(data, str) else json.dumps(data)
-    fields: dict[str, Any] = {
-        "complete": True,
-        "finish_reason": "STOP",
-        "block_reason": None,
-        "usage": Usage(100, 20, 0.5),
-    }
-    fields.update(kw)
-    return StructuredResponse(text=text, **fields)
-
-
-class ScriptedProvider:
-    def __init__(self, *responses: StructuredResponse | Exception) -> None:
-        self.responses = list(responses)
-        self.calls: list[tuple[str, str, dict[str, Any]]] = []
-
-    @property
-    def model(self) -> str:
-        return "fake-model"
-
-    def generate_structured(
-        self, system: str, user: str, schema: dict[str, Any]
-    ) -> StructuredResponse:
-        self.calls.append((system, user, schema))
-        outcome = self.responses.pop(0)
-        if isinstance(outcome, Exception):
-            raise outcome
-        return outcome
 
 
 def test_schema_enum_is_the_taxonomy() -> None:
