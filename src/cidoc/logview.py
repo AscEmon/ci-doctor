@@ -11,6 +11,7 @@ import re
 from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
 
 TAIL_LINES = 120
 CONTEXT_LINES = 3
@@ -330,40 +331,69 @@ def failed_step_lines(text: str, failed_steps: Iterable[str] = ()) -> list[str]:
     ]
 
 
+WindowKind = Literal["error_lead", "step_head", "noise_lead", "marker", "step"]
+
+
+@dataclass(frozen=True)
+class FocusWindow:
+    kind: WindowKind
+    indices: tuple[int, ...]
+    """0-based, visible (not hidden), ascending."""
+
+
+def focus_windows(
+    located: LogSteps,
+    context: int = CONTEXT_LINES,
+    max_snippets: int | None = MAX_SNIPPETS,
+    lines_before_error: int = LINES_BEFORE_ERROR,
+    hidden: set[int] | None = None,
+) -> list[FocusWindow]:
+    """What the focus view shows, as typed windows (they may overlap).
+
+    - "step": a whole failed step, if it has at most FULL_STEP_MAX_LINES visible lines
+    - "step_head": the first lines of a longer failed step
+    - "marker": error-marker lines of a failed step with `context` lines around them
+      (the first `max_snippets` per step)
+    - "error_lead": each ##[error] line and the `lines_before_error` lines above it
+    - "noise_lead": the lines above a fastlane update notice in a failed step
+
+    `hidden` overrides `located.hidden` (callers may hide more noise).
+    """
+    lines = located.lines
+    if hidden is None:
+        hidden = located.hidden
+
+    def window(kind: WindowKind, start: int, stop: int) -> FocusWindow:
+        return FocusWindow(kind, tuple(i for i in range(max(0, start), stop) if i not in hidden))
+
+    windows: list[FocusWindow] = []
+    for e in located.errors:
+        windows.append(window("error_lead", e - lines_before_error, e + 1))
+    for step in located.failed:
+        visible = [i for i in range(step.start, step.stop) if i not in hidden]
+        if len(visible) <= FULL_STEP_MAX_LINES:
+            windows.append(FocusWindow("step", tuple(visible)))
+        else:
+            windows.append(FocusWindow("step_head", tuple(visible[:STEP_HEAD_LINES])))
+        step_lines = lines[step.start : step.stop]
+        for start, stop in marker_windows(step_lines, len(step_lines), context)[:max_snippets]:
+            windows.append(window("marker", step.start + start, step.start + stop))
+    # fastlane prints its update notice right after the failure: show what came before it.
+    for n in located.noise_starts:
+        if any(step.start <= n < step.stop for step in located.failed):
+            windows.append(window("noise_lead", n - LINES_BEFORE_NOISE, n))
+    return [w for w in windows if w.indices]
+
+
 def focus_indices(
     located: LogSteps,
     context: int = CONTEXT_LINES,
     max_snippets: int | None = MAX_SNIPPETS,
     hidden: set[int] | None = None,
 ) -> set[int]:
-    """0-based indices the focus view shows: the failed step(s), condensed if long, and
-    the lines leading up to each error and to each fastlane update notice.
-
-    `context` and `max_snippets` size the marker windows of condensed steps; `hidden`
-    overrides `located.hidden` (callers may hide more noise).
-    """
-    lines = located.lines
-    if hidden is None:
-        hidden = located.hidden
-    shown: set[int] = set()
-    for step in located.failed:
-        visible = [i for i in range(step.start, step.stop) if i not in hidden]
-        if len(visible) <= FULL_STEP_MAX_LINES:
-            shown.update(visible)
-            continue
-        shown.update(visible[:STEP_HEAD_LINES])
-        step_lines = lines[step.start : step.stop]
-        windows = marker_windows(step_lines, len(step_lines), context)[:max_snippets]
-        for start, stop in windows:
-            shown.update(i for i in range(step.start + start, step.start + stop) if i not in hidden)
-    for e in located.errors:
-        shown.update(i for i in range(max(0, e - LINES_BEFORE_ERROR), e + 1) if i not in hidden)
-    # fastlane prints its update notice right after the failure: show what came before it.
-    for n in located.noise_starts:
-        if any(step.start <= n < step.stop for step in located.failed):
-            lead = range(max(0, n - LINES_BEFORE_NOISE), n)
-            shown.update(i for i in lead if i not in hidden)
-    return shown
+    """0-based indices the focus view shows: the union of its windows."""
+    windows = focus_windows(located, context, max_snippets, hidden=hidden)
+    return {i for w in windows for i in w.indices}
 
 
 def build_focus_view(text: str, failed_steps: Iterable[str] = ()) -> FocusView:

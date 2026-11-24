@@ -5,15 +5,34 @@ nothing after "Post job cleanup.", successful composite sub-steps hidden) with w
 context around error markers, then drops known noise and collapses repeated lines.
 Every kept line is prefixed with its 1-based number in the stored log ("L1234| "), so
 the model can cite original line numbers as evidence.
+
+The result fits a token budget: candidate windows are ranked, and the lowest-ranked
+ones are dropped first. The lines leading up to each ##[error] are always kept.
 """
 
 import re
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 
-from cidoc.logview import TAIL_LINES, focus_indices, is_marker, locate_failed_steps
+from cidoc.logview import TAIL_LINES, focus_windows, is_marker, locate_failed_steps
 
 MARKER_CONTEXT = 15
+LINES_BEFORE_ERROR = 80
+DEFAULT_TOKEN_BUDGET = 6000
+# Rough estimate for English and code; logs with long hashes or URLs run a bit higher.
+CHARS_PER_TOKEN = 4
+# Single lines can be huge (minified JS, base64 blobs); never let one eat the budget.
+MAX_LINE_CHARS = 500
+
+# Lower is more important. error_lead is always kept, whatever the budget.
+PRIORITY = {
+    "error_lead": 0,
+    "step_head": 1,
+    "noise_lead": 2,
+    "tail": 2,
+    "marker": 3,
+    "step": 4,
+}
 
 # Flutter's first-run analytics notice, drawn in a ╔═╗ box.
 _WELCOME = "Welcome to Flutter"
@@ -88,6 +107,10 @@ def noise_lines(lines: list[str], end: int) -> set[int]:
     return noise
 
 
+def estimate_tokens(text: str) -> int:
+    return -(-len(text) // CHARS_PER_TOKEN)
+
+
 @dataclass(frozen=True)
 class Line:
     number: int
@@ -96,31 +119,11 @@ class Line:
     repeat: int = 1
 
     def render(self) -> str:
+        text = self.text
+        if len(text) > MAX_LINE_CHARS:
+            text = f"{text[:MAX_LINE_CHARS]}... [{len(text) - MAX_LINE_CHARS} chars truncated]"
         suffix = f" (repeated {self.repeat} times)" if self.repeat > 1 else ""
-        return f"L{self.number}| {self.text}{suffix}"
-
-
-@dataclass(frozen=True)
-class PreprocessedLog:
-    total_lines: int
-    failed_titles: list[str]
-    blocks: list[list[Line]]
-    """Contiguous runs of kept lines, in log order, with repeats collapsed."""
-
-    @property
-    def text(self) -> str:
-        out: list[str] = []
-        previous = 0
-        for block in self.blocks:
-            gap = block[0].number - previous - 1
-            if gap:
-                out.append(f"... ({gap} lines omitted)")
-            out.extend(line.render() for line in block)
-            last = block[-1]
-            previous = last.number + last.repeat - 1
-        if self.blocks and previous < self.total_lines:
-            out.append(f"... ({self.total_lines - previous} lines omitted)")
-        return "\n".join(out)
+        return f"L{self.number}| {text}{suffix}"
 
 
 def collapse_repeats(numbered: Iterable[tuple[int, str]]) -> Iterator[Line]:
@@ -137,34 +140,107 @@ def collapse_repeats(numbered: Iterable[tuple[int, str]]) -> Iterator[Line]:
         yield current
 
 
-def select_indices(
+def _blocks(lines: list[str], keep: set[int]) -> list[list[Line]]:
+    runs: list[list[tuple[int, str]]] = []
+    for i in sorted(keep):
+        if runs and runs[-1][-1][0] == i:  # previous index i-1 has number i
+            runs[-1].append((i + 1, lines[i]))
+        else:
+            runs.append([(i + 1, lines[i])])
+    return [list(collapse_repeats(run)) for run in runs]
+
+
+def render(blocks: list[list[Line]], total_lines: int) -> str:
+    out: list[str] = []
+    previous = 0
+    for block in blocks:
+        gap = block[0].number - previous - 1
+        if gap:
+            out.append(f"... ({gap} lines omitted)")
+        out.extend(line.render() for line in block)
+        last = block[-1]
+        previous = last.number + last.repeat - 1
+    if blocks and previous < total_lines:
+        out.append(f"... ({total_lines - previous} lines omitted)")
+    return "\n".join(out)
+
+
+@dataclass(frozen=True)
+class PreprocessedLog:
+    total_lines: int
+    failed_titles: list[str]
+    blocks: list[list[Line]]
+    """Contiguous runs of kept lines, in log order, with repeats collapsed."""
+    budget_tokens: int
+    dropped_windows: int
+    """Candidate windows left out to stay within the budget."""
+
+    @property
+    def text(self) -> str:
+        return render(self.blocks, self.total_lines)
+
+    @property
+    def estimated_tokens(self) -> int:
+        return estimate_tokens(self.text)
+
+
+Window = tuple[int, tuple[int, ...]]
+"""(priority, 0-based indices)"""
+
+
+def candidate_windows(
     text: str, failed_steps: Iterable[str] = ()
-) -> tuple[list[str], set[int], list[str]]:
-    """Cleaned lines, 0-based indices to keep, and the titles of the failed steps."""
+) -> tuple[list[str], list[Window], list[str]]:
+    """Cleaned lines, ranked candidate windows (most important first), failed step titles."""
     located = locate_failed_steps(text, failed_steps)
     lines, end = located.lines, located.end
     dropped = located.hidden | noise_lines(lines, end)
-    keep = focus_indices(located, context=MARKER_CONTEXT, max_snippets=None, hidden=dropped)
+    windows: list[Window] = [
+        (PRIORITY[w.kind], w.indices)
+        for w in focus_windows(
+            located,
+            context=MARKER_CONTEXT,
+            max_snippets=None,
+            lines_before_error=LINES_BEFORE_ERROR,
+            hidden=dropped,
+        )
+    ]
     if not located.failed:
         # No failed step found: every marker in the log, plus its last lines.
-        for i in range(end):
-            if is_marker(lines[i]) and i not in dropped:
-                keep.update(range(max(0, i - MARKER_CONTEXT), min(end, i + MARKER_CONTEXT + 1)))
         visible = [i for i in range(end) if i not in dropped]
-        keep.update(visible[-TAIL_LINES:])
-    return lines, keep - dropped, [step.title for step in located.failed]
+        windows.append((PRIORITY["tail"], tuple(visible[-TAIL_LINES:])))
+        for i in visible:
+            if is_marker(lines[i]):
+                lo, hi = i - MARKER_CONTEXT, i + MARKER_CONTEXT + 1
+                window = tuple(j for j in range(max(0, lo), min(end, hi)) if j not in dropped)
+                windows.append((PRIORITY["marker"], window))
+    windows.sort(key=lambda w: w[0])  # stable: same priority keeps log order
+    return lines, windows, [step.title for step in located.failed]
 
 
-def preprocess(text: str, failed_steps: Iterable[str] = ()) -> PreprocessedLog:
-    lines, keep, titles = select_indices(text, failed_steps)
-    blocks: list[list[tuple[int, str]]] = []
-    for i in sorted(keep):
-        if blocks and blocks[-1][-1][0] == i:  # previous index i-1 has number i
-            blocks[-1].append((i + 1, lines[i]))
-        else:
-            blocks.append([(i + 1, lines[i])])
+def preprocess(
+    text: str,
+    failed_steps: Iterable[str] = (),
+    budget_tokens: int = DEFAULT_TOKEN_BUDGET,
+) -> PreprocessedLog:
+    lines, windows, titles = candidate_windows(text, failed_steps)
+    total = len(lines)
+    keep: set[int] = set()
+    taken = 0
+    for priority, indices in windows:
+        if not set(indices) - keep:
+            taken += 1
+            continue
+        candidate = keep | set(indices)
+        fits = estimate_tokens(render(_blocks(lines, candidate), total)) <= budget_tokens
+        if priority > PRIORITY["error_lead"] and not fits:
+            break  # everything from here on ranks lower
+        keep = candidate
+        taken += 1
     return PreprocessedLog(
-        total_lines=len(lines),
+        total_lines=total,
         failed_titles=titles,
-        blocks=[list(collapse_repeats(block)) for block in blocks],
+        blocks=_blocks(lines, keep),
+        budget_tokens=budget_tokens,
+        dropped_windows=len(windows) - taken,
     )
