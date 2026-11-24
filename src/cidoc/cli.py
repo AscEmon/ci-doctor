@@ -12,8 +12,8 @@ from rich.console import Console
 from rich.table import Table
 from rich.text import Text
 
-from cidoc.analyze.analyzer import analyze_log
-from cidoc.analyze.display import render_result
+from cidoc.analyze.cache import ResponseCache, analyze_cached
+from cidoc.analyze.display import render_result, render_usage
 from cidoc.analyze.inputs import InputError, resolve_input
 from cidoc.analyze.preprocess import preprocess
 from cidoc.analyze.prompt import GuidelineError, load_prompt
@@ -116,6 +116,9 @@ def analyze(
         int | None,
         typer.Option(min=1, help="Token budget for the log excerpt (default: CIDOC_TOKEN_BUDGET)."),
     ] = None,
+    refresh: Annotated[
+        bool, typer.Option("--refresh", help="Ignore a cached result and call the API again.")
+    ] = False,
 ) -> None:
     """Diagnose one failed job with the LLM."""
     settings = get_settings()
@@ -140,11 +143,13 @@ def analyze(
         )
     )
     try:
-        result = analyze_log(provider, log, prompt)
+        cache = ResponseCache.in_data_dir(settings.data_dir)
+        result = analyze_cached(provider, log, prompt, cache, refresh=refresh)
     except LLMError as exc:
         console.print(Text(str(exc), style="red"))
         raise typer.Exit(1) from None
     render_result(console, result, clean_log(source.text))
+    render_usage(console, result, settings.price_for(provider.model))
     if not result.ok:
         raise typer.Exit(1)
 

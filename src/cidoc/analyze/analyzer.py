@@ -29,6 +29,9 @@ class AnalysisResult:
     failure: str | None
     """Why there is no diagnosis (from the last attempt); None on success."""
     calls: list[Usage]
+    """Every API call made for this result (the first and, if needed, the retry)."""
+    cached: bool = False
+    """Read from the response cache: no call was made this time."""
 
     @property
     def ok(self) -> bool:

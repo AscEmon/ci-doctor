@@ -223,3 +223,33 @@ def test_model_output_is_printed_literally(data_dir: Path, provider: ScriptedPro
     result = run("42")
 
     assert "[red]boom[/red] in [bold]x" in result.output
+
+
+def test_rerun_uses_the_cache_and_prints_usage(
+    data_dir: Path, provider: ScriptedProvider, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("CIDOC_PRICES", '{"fake-model": {"input": 0.1, "output": 0.4}}')
+    get_settings.cache_clear()
+    store_job(data_dir, 42, log_text())
+
+    first = run("42")
+    second = run("42")
+
+    assert first.exit_code == second.exit_code == 0
+    assert len(provider.calls) == 1
+    assert "usage (fake-model)" in first.output
+    assert "$0.000018" in first.output  # 100 in, 20 out
+    assert "cached: no API call, $0 this run" in second.output
+    assert "dart_compile" in second.output
+
+
+def test_refresh_bypasses_the_cache(data_dir: Path, provider: ScriptedProvider) -> None:
+    provider.responses.append(ok(VALID_DIAGNOSIS))
+    store_job(data_dir, 42, log_text())
+
+    run("42")
+    result = run("42", "--refresh")
+
+    assert result.exit_code == 0, result.output
+    assert len(provider.calls) == 2
+    assert "cached" not in result.output
