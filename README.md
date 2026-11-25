@@ -47,6 +47,10 @@ what the prompt is tuned on, and labels written before splits existed are `dev`.
 `dev` by default; use `--split test1`, `--split test2` or `--split all` for the
 others.
 
+Re-check dev labels after a guideline change with
+`uv run cidoc label review --category other,ci_config,signing_secrets`. It uses the
+`label edit` flow and never shows model predictions. It refuses `test1`/`test2`.
+
 ## Development checks
 
 ```sh

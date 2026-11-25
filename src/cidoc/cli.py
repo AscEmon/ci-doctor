@@ -5,7 +5,7 @@ import sqlite3
 from datetime import UTC, datetime
 from importlib.metadata import version
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Literal
 
 import typer
 from rich.console import Console
@@ -40,11 +40,13 @@ from cidoc.eval.results import RunInfo, load_run, run_path, write_run
 from cidoc.eval.runner import ALL_SPLITS, LLMPredictor, load_cases, plan_run, run_eval
 from cidoc.github_client import GitHubClient
 from cidoc.labeling.labels import (
+    CATEGORIES,
     DEV_SPLIT,
     LABELS_FILENAME,
     SPLITS,
     TEST2_SPLIT,
     LabelNotFoundError,
+    StoredLabel,
     find_label,
     load_labels,
     newest_labels,
@@ -895,12 +897,31 @@ def label_edit(
     except LabelNotFoundError as exc:
         console.print(f"[red]{exc}[/red]")
         raise typer.Exit(1) from None
-    current = stored.label
+    try:
+        outcome = edit_stored_label(labels_path, data_dir, stored)
+    except QuitRequestedError:
+        console.print("[yellow]Quit: label unchanged.[/yellow]")
+        raise typer.Exit(0) from None
+    if outcome == "missing_log":
+        raise typer.Exit(1)
 
+
+EditOutcome = Literal["saved", "unchanged", "missing_log"]
+
+
+def edit_stored_label(
+    labels_path: Path, data_dir: Path, stored: StoredLabel, index: int = 1, total: int = 1
+) -> EditOutcome:
+    """Show the label's log and run the edit prompts; save only if something changed.
+
+    Shows the log, the job header and the current label: never a model prediction or a
+    hint. Raises QuitRequestedError on quit, leaving this label unchanged.
+    """
+    current = stored.label
     log_file = data_dir / current.log_path
     if not log_file.exists():
         console.print(f"[red]log missing:[/red] {log_file}; cannot show or check evidence lines.")
-        raise typer.Exit(1)
+        return "missing_log"
     conn = open_db()
     try:
         candidate = load_candidate(conn, current.job_id)
@@ -923,22 +944,82 @@ def label_edit(
     text = read_log(log_file)
     full = build_view(text)
     views = ViewToggle(console, full, build_focus_view(text, candidate.failed_steps))
-    render_header(console, candidate, 1, 1)
+    render_header(console, candidate, index, total)
     views.render()
     console.print(
         f"[bold]Editing label for job {current.job_id}[/bold]"
         f" (labeled {current.labeled_at}). Enter keeps the current value."
     )
-    try:
-        changes = edit_one(console, typer.getchar, console.input, current, full.total_lines, views)
-    except QuitRequestedError:
-        console.print("[yellow]Quit: label unchanged.[/yellow]")
-        raise typer.Exit(0) from None
+    changes = edit_one(console, typer.getchar, console.input, current, full.total_lines, views)
 
     changed = [k for k, v in changes.items() if stored.record.get(k) != v]
     if not changed:
         console.print("No changes; label unchanged.")
-        return
+        return "unchanged"
     record = {**stored.record, **changes, "edited_at": datetime.now(UTC).isoformat()}
     replace_label_line(labels_path, stored.line_index, record)
     console.print(f"Saved: changed {', '.join(changed)} for job {current.job_id}.")
+    return "saved"
+
+
+@label_app.command("review")
+def label_review(
+    split: Annotated[
+        str, typer.Option(help="Split to review. Only dev: test labels are never re-checked.")
+    ] = DEV_SPLIT,
+    category: Annotated[
+        str | None,
+        typer.Option(
+            help="Comma-separated categories to review, e.g. other,ci_config (default: all)."
+        ),
+    ] = None,
+) -> None:
+    """Re-check dev labels one by one with the `label edit` flow (Enter keeps each value).
+
+    Shows only the log and the current label, never a model prediction, so the
+    review is decided from the log and the guideline alone.
+    """
+    if split != DEV_SPLIT:
+        console.print(
+            f"[red]Refusing to review the {split} split: only dev labels may be re-checked"
+            " (test labels are reported as-is and never tuned on).[/red]"
+        )
+        raise typer.Exit(2)
+    wanted = set(CATEGORIES)
+    if category is not None:
+        wanted = {c.strip() for c in category.split(",") if c.strip()}
+        unknown = sorted(wanted - set(CATEGORIES))
+        if unknown or not wanted:
+            console.print(
+                f"[red]Unknown categories {unknown}; choose from {', '.join(CATEGORIES)}.[/red]"
+            )
+            raise typer.Exit(2)
+    data_dir = get_settings().data_dir
+    labels_path = data_dir / LABELS_FILENAME
+    picks = [
+        label.job_id
+        for label in newest_labels(load_labels(labels_path)).values()
+        if label.split == DEV_SPLIT and label.category in wanted
+    ]
+    if not picks:
+        console.print("No dev labels in those categories.")
+        return
+    console.print(
+        f"Reviewing {len(picks)} dev labels. Decide from the log and the guideline only,"
+        " and record the reason in the root cause. q stops; reviewed labels are kept."
+    )
+    counts = {"saved": 0, "unchanged": 0, "missing_log": 0}
+    for index, job_id in enumerate(picks, start=1):
+        # Looked up again each time, so the line index is current.
+        stored = find_label(labels_path, job_id)
+        try:
+            counts[edit_stored_label(labels_path, data_dir, stored, index, len(picks))] += 1
+        except QuitRequestedError:
+            console.print(
+                f"[yellow]Stopped at {index} of {len(picks)}: job {job_id} unchanged.[/yellow]"
+            )
+            break
+    console.print(
+        f"Reviewed: {counts['saved']} changed, {counts['unchanged']} kept,"
+        f" {counts['missing_log']} skipped (log missing)."
+    )

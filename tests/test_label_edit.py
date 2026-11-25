@@ -249,3 +249,105 @@ def test_load_labels_ignores_unknown_fields(tmp_path: Path) -> None:
     [label] = load_labels(path)
 
     assert label.job_id == 12
+
+
+# --- label review -------------------------------------------------------------------
+
+
+def review(
+    monkeypatch: pytest.MonkeyPatch, args: list[str], keys: str = "", answers: str = ""
+) -> tuple[int, str]:
+    pressed = iter(keys)
+    monkeypatch.setattr(typer, "getchar", lambda: next(pressed))
+    result = CliRunner().invoke(app, ["label", "review", *args], input=answers, terminal_width=200)
+    return result.exit_code, result.output
+
+
+REVIEW_LINES = [
+    json.dumps(record(11, category="other")) + "\n",  # no split: dev
+    json.dumps(record(12, category="other", split="test1")) + "\n",
+    json.dumps(record(13, category="signing_secrets", split="dev")) + "\n",
+]
+
+
+@pytest.fixture
+def review_env(env: Path) -> Path:
+    (env / "labels.jsonl").write_text("".join(REVIEW_LINES), encoding="utf-8")
+    return env
+
+
+def test_review_steps_through_dev_labels_in_the_categories(
+    review_env: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Job 11: category c (ci_config), new cause, keep evidence, keep confidence.
+    # Job 13: keep everything. Job 12 is test1 and must not come up.
+    code, out = review(
+        monkeypatch,
+        ["--split", "dev", "--category", "other,ci_config,signing_secrets"],
+        "c\r" + "\r\r",
+        "token not passed to the step: workflow has no env\n\n" + "\n\n",
+    )
+
+    assert code == 0, out
+    assert "Reviewing 2 dev labels" in out
+    assert "1/2" in out and "2/2" in out
+    assert "job 12" not in out
+    assert "Reviewed: 1 changed, 1 kept, 0 skipped" in out
+    after = lines(review_env)
+    assert after[1:] == REVIEW_LINES[1:]
+    edited = json.loads(after[0])
+    assert (edited["category"], edited["root_cause"]) == (
+        "ci_config",
+        "token not passed to the step: workflow has no env",
+    )
+    assert edited["edited_at"] is not None
+
+
+def test_review_never_shows_predictions_or_hints(
+    review_env: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    code, out = review(monkeypatch, ["--category", "other"], "\r\r", "\n\n")
+
+    assert code == 0, out
+    lowered = out.lower()
+    assert "predict" not in lowered
+    assert "hint" not in lowered
+    assert "model" not in lowered
+
+
+@pytest.mark.parametrize("split", ["test1", "test2"])
+def test_review_refuses_test_splits(
+    review_env: Path, monkeypatch: pytest.MonkeyPatch, split: str
+) -> None:
+    code, out = review(monkeypatch, ["--split", split, "--category", "other"])
+
+    assert code == 2
+    assert f"Refusing to review the {split} split" in out
+    assert lines(review_env) == REVIEW_LINES
+
+
+def test_review_rejects_unknown_categories(
+    review_env: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    code, out = review(monkeypatch, ["--category", "other,flaky"])
+
+    assert code == 2
+    assert "Unknown categories ['flaky']" in out
+
+
+def test_review_quit_keeps_earlier_edits(review_env: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Job 11: change confidence to 3; then quit on job 13.
+    code, out = review(monkeypatch, ["--category", "other,signing_secrets"], "\r3q", "\n\n")
+
+    assert code == 0, out
+    assert "Stopped at 2 of 2: job 13 unchanged." in out
+    after = lines(review_env)
+    assert json.loads(after[0])["confidence"] == 3
+    assert after[1:] == REVIEW_LINES[1:]
+
+
+def test_review_with_nothing_to_review(review_env: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    code, out = review(monkeypatch, ["--category", "store_release"])
+
+    assert code == 0
+    assert "No dev labels in those categories." in out
