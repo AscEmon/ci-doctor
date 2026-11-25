@@ -91,6 +91,61 @@ def test_limit_takes_the_first_labels(data_dir: Path) -> None:
     assert [c.label.job_id for c in load_cases(data_dir, opener(data_dir), 2).cases] == [1, 2]
 
 
+def test_load_cases_filters_by_split_using_the_newest_label(data_dir: Path) -> None:
+    setup_jobs(data_dir)  # all dev
+    store_job(data_dir, 4, log_text("Building flavor four"))
+    add_label(data_dir, 4, "other", split="test")
+    add_label(data_dir, 2, "dart_compile", split="test")  # relabeled into test
+
+    def ids(split: str) -> list[int]:
+        return [c.label.job_id for c in load_cases(data_dir, opener(data_dir), split=split).cases]
+
+    assert ids("dev") == [1, 3]
+    assert ids("test") == [4, 2]
+    assert ids("all") == [1, 3, 4, 2]
+
+
+def test_eval_defaults_to_dev_and_records_the_split(data_dir: Path) -> None:
+    setup_jobs(data_dir)
+    store_job(data_dir, 4, log_text("Building flavor four"))
+    add_label(data_dir, 4, "other", split="test")
+
+    result = run("--model", "regex-baseline")
+
+    assert result.exit_code == 0, result.output
+    assert "split" in result.output and "dev" in result.output
+    saved = load_run(run_files(data_dir)[-1])
+    assert saved.info.split == "dev"
+    assert sorted(item.job_id for item in saved.items) == [1, 2, 3]
+
+
+def test_eval_test_split(data_dir: Path) -> None:
+    setup_jobs(data_dir)
+    store_job(data_dir, 4, log_text("Building flavor four"))
+    add_label(data_dir, 4, "other", split="test")
+
+    result = run("--model", "regex-baseline", "--split", "test")
+
+    assert result.exit_code == 0, result.output
+    saved = load_run(run_files(data_dir)[-1])
+    assert (saved.info.split, [item.job_id for item in saved.items]) == ("test", [4])
+
+
+def test_eval_rejects_unknown_split(data_dir: Path) -> None:
+    assert run("--split", "train").exit_code == 2
+
+
+def test_old_run_file_without_split_reads_as_dev(data_dir: Path) -> None:
+    setup_jobs(data_dir)
+    run("--model", "regex-baseline")
+    path = run_files(data_dir)[-1]
+    data = json.loads(path.read_text())
+    del data["split"]
+    path.write_text(json.dumps(data))
+
+    assert load_run(path).info.split == "dev"
+
+
 # --- regex baseline -----------------------------------------------------------------
 
 

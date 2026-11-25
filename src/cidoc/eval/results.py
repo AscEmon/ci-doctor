@@ -37,6 +37,9 @@ class RunInfo:
     """Why the run ended early; None when every item was scored."""
     missing: list[int] = field(default_factory=list)
     """Labeled jobs whose log is gone; not scored."""
+    split: str = "dev"
+    """Labels scored: "dev", "test" or "all". Runs saved before splits existed scored
+    every label, and all of those are read as "dev"."""
 
 
 @dataclass(frozen=True)

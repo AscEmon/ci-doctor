@@ -118,6 +118,8 @@ def compare_runs(a: RunFile, b: RunFile, price_for: Callable[[str], Price | None
     disagreements.sort(key=lambda d: not (d.a_correct or d.b_correct))  # stable
 
     notes: list[str] = []
+    if a.info.split != b.info.split:
+        notes.append(f"The runs scored different splits ({a.info.split} vs {b.info.split}).")
     if a.info.guideline_hash != b.info.guideline_hash:
         notes.append("The runs used different labeling guidelines (guideline hash differs).")
     if any(a_items[j].gold != b_items[j].gold for j in shared):

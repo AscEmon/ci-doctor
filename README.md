@@ -40,6 +40,11 @@ Label failed jobs by hand with `uv run cidoc label`, and fix a label with
 [labeling guideline](docs/LABELING_GUIDELINE.md) for how to read a log, what each
 category means, and the tie-break rules.
 
+Each label has a `split`. Labels written before splits existed are `dev`, which is
+the set the prompt is tuned on. New labels default to `test`, which is held out
+(`cidoc label --split dev` overrides this). `uv run cidoc eval` scores `dev` by
+default; use `--split test` or `--split all` for the others.
+
 ## Development checks
 
 ```sh

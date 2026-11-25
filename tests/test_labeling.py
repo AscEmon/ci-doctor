@@ -283,6 +283,7 @@ def test_session_labels_skips_and_retries_invalid_input(tmp_path: Path) -> None:
         confidence=3,
         log_path="logs/o__a/1.log.gz",
         labeled_at=NOW.isoformat(),
+        split="test",
     )
     assert (labels[1].job_id, labels[1].category, labels[1].confidence) == (
         3,
@@ -490,3 +491,41 @@ def test_label_command_skips_over_redacted(
     assert expected in result.output
     hint = "Skipping 1 over-redacted logs (--include-over-redacted to label them)."
     assert (hint in result.output) is (not args)
+
+
+def test_label_without_split_field_reads_as_dev(tmp_path: Path) -> None:
+    path = tmp_path / "labels.jsonl"
+    record = {
+        "job_id": 1,
+        "repo": "o/a",
+        "run_id": 1,
+        "category": "other",
+        "root_cause": "cause",
+        "evidence_lines": [1],
+        "confidence": 2,
+        "log_path": "logs/o__a/1.log.gz",
+        "labeled_at": NOW.isoformat(),
+    }
+    path.write_text(json.dumps(record) + "\n")
+
+    assert load_labels(path)[0].split == "dev"
+
+
+def test_session_writes_the_requested_split(tmp_path: Path) -> None:
+    picks = [candidate(1, "o/a")]
+    write_log(tmp_path, picks[0])
+    labels_path = tmp_path / "labels.jsonl"
+    script = Script(keys="1" + "2", answers=["cause", "1"])
+
+    run_session(
+        Console(record=True, color_system=None),
+        picks,
+        tmp_path,
+        labels_path,
+        script.getch,
+        script.ask,
+        clock=lambda: NOW,
+        split="dev",
+    )
+
+    assert json.loads(labels_path.read_text())["split"] == "dev"

@@ -47,6 +47,7 @@ def render_summary(console: Console, info: RunInfo, metrics: Metrics) -> None:
     headline.add_column(style="bold")
     headline.add_column(justify="right")
     rows = [
+        ("split", info.split),
         ("items scored", f"{metrics.n} of {info.labels_total} labels"),
         ("accuracy", f"{pct(metrics.accuracy)} ({metrics.correct}/{metrics.n})"),
         ("macro-F1", f"{pct(metrics.macro_f1)} ({len(metrics.macro_f1_categories)} categories)"),
@@ -184,7 +185,7 @@ def _delta(delta: MetricDelta) -> Text:
 
 def _run_label(run: RunFile) -> str:
     version = run.info.prompt_version or "no prompt"
-    return f"{run.info.model} ({version}, {run.info.created_at[:16]})"
+    return f"{run.info.model} ({version}, {run.info.split} split, {run.info.created_at[:16]})"
 
 
 def render_comparison(

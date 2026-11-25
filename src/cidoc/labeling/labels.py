@@ -45,6 +45,13 @@ CATEGORY_HINTS: dict[str, str] = {
 
 CONFIDENCE_LEVELS = (1, 2, 3)
 
+# Which evaluation set a label belongs to. Labels written before splits existed have no
+# "split" field and are read as "dev": they were looked at while the prompt was tuned.
+# New labels default to "test", held out to measure the tuned prompt.
+DEV_SPLIT = "dev"
+TEST_SPLIT = "test"
+SPLITS = (DEV_SPLIT, TEST_SPLIT)
+
 
 @dataclass(frozen=True)
 class Label:
@@ -67,6 +74,8 @@ class Label:
     """
     edited_at: str | None = None
     """When the label was last changed with `cidoc label edit`; None if never."""
+    split: str = DEV_SPLIT
+    """Evaluation set ("dev" or "test"); a missing field is read as "dev"."""
 
 
 def label_from_record(record: dict[str, Any]) -> Label:

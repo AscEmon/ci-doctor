@@ -37,10 +37,13 @@ from cidoc.eval.display import (
 )
 from cidoc.eval.metrics import compute_metrics
 from cidoc.eval.results import RunInfo, load_run, run_path, write_run
-from cidoc.eval.runner import LLMPredictor, load_cases, plan_run, run_eval
+from cidoc.eval.runner import ALL_SPLITS, LLMPredictor, load_cases, plan_run, run_eval
 from cidoc.github_client import GitHubClient
 from cidoc.labeling.labels import (
+    DEV_SPLIT,
     LABELS_FILENAME,
+    SPLITS,
+    TEST_SPLIT,
     LabelNotFoundError,
     find_label,
     load_labels,
@@ -132,6 +135,10 @@ def eval_command(
     limit: Annotated[
         int | None, typer.Option(min=1, help="Only the first N labels (in labels.jsonl order).")
     ] = None,
+    split: Annotated[
+        str,
+        typer.Option(help="Which labels to score: dev, test or all (missing split = dev)."),
+    ] = DEV_SPLIT,
     refresh: Annotated[
         bool, typer.Option("--refresh", help="Ignore cached results and call the API again.")
     ] = False,
@@ -176,6 +183,9 @@ def eval_command(
     scored. Exit code 1 if anything was not scored, 130 after Ctrl-C.
     """
     settings = get_settings()
+    if split not in (*SPLITS, ALL_SPLITS):
+        console.print(f"[red]--split must be one of {', '.join((*SPLITS, ALL_SPLITS))}.[/red]")
+        raise typer.Exit(2)
     if show is not None and compare is not None:
         console.print("[red]Use --show or --compare, not both.[/red]")
         raise typer.Exit(2)
@@ -228,21 +238,24 @@ def eval_command(
         console.print(Text(f"--max-cost needs a price for {name}: set CIDOC_PRICES.", "red"))
         raise typer.Exit(2)
 
-    loaded = load_cases(settings.data_dir, open_db, limit)
+    loaded = load_cases(settings.data_dir, open_db, limit, split)
     if loaded.missing:
         console.print(
             f"[yellow]{len(loaded.missing)} labeled jobs have no log and are not scored:[/yellow]"
             f" {', '.join(map(str, loaded.missing))}"
         )
     if not loaded.cases:
-        console.print("[red]No labeled jobs with logs to evaluate.[/red]")
+        console.print(f"[red]No labeled jobs with logs to evaluate in the {split} split.[/red]")
         raise typer.Exit(1)
 
     budget = settings.cidoc_token_budget
     cache = ResponseCache.in_data_dir(settings.data_dir)
     if dry_run:
         if baseline:
-            console.print(f"dry run: {REGEX_BASELINE}, {len(loaded.cases)} items, no API calls, $0")
+            console.print(
+                f"dry run: {REGEX_BASELINE}, {split} split, {len(loaded.cases)} items,"
+                " no API calls, $0"
+            )
             return
         plan = plan_run(loaded.cases, prompt, cache, name, budget, refresh=refresh)
         estimate = estimate_run(plan.calls, plan.cached, price, settings.cidoc_rpm)
@@ -281,6 +294,7 @@ def eval_command(
         complete=outcome.stopped is None,
         stopped=outcome.stopped,
         missing=loaded.missing,
+        split=split,
     )
     path = run_path(settings.data_dir, predictor.name, datetime.now(UTC))
     write_run(path, info, outcome.items, metrics)
@@ -797,10 +811,17 @@ def label(
             help="Also offer logs marked over_redacted (old masks hid context; log expired).",
         ),
     ] = False,
+    split: Annotated[
+        str,
+        typer.Option(help="Split recorded on this session's new labels: dev or test."),
+    ] = TEST_SPLIT,
 ) -> None:
     """Label unlabeled failures by hand; answers are appended to labels.jsonl."""
     if ctx.invoked_subcommand is not None:
         return
+    if split not in SPLITS:
+        console.print(f"[red]--split must be one of {', '.join(SPLITS)}.[/red]")
+        raise typer.Exit(2)
     data_dir = get_settings().data_dir
     labels_path = data_dir / LABELS_FILENAME
 
@@ -835,6 +856,7 @@ def label(
         capped = f" ({len(candidates)} eligible at {max_per_run} per run)"
     console.print(
         f"{len(existing)} labeled so far; {unlabeled} unlabeled{capped}; picked {len(picks)}."
+        f" New labels go to the {split} split."
     )
     result = run_session(
         console,
@@ -844,6 +866,7 @@ def label(
         getch=typer.getchar,
         ask=console.input,
         clock=lambda: datetime.now(UTC),
+        split=split,
     )
     status = "Stopped" if result.quit else "Done"
     console.print(

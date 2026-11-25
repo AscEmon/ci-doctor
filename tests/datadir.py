@@ -65,6 +65,7 @@ def add_label(
     category: str,
     confidence: int = 2,
     evidence: list[int] | None = None,
+    split: str = "dev",
 ) -> Label:
     label = Label(
         job_id=job_id,
@@ -76,6 +77,7 @@ def add_label(
         confidence=confidence,
         log_path=f"logs/o__a/{job_id}.log.gz",
         labeled_at=NOW.isoformat(),
+        split=split,
     )
     append_label(data_dir / LABELS_FILENAME, label)
     return label

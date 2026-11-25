@@ -22,8 +22,11 @@ from cidoc.analyze.preprocess import PreprocessedLog, preprocess
 from cidoc.analyze.prompt import Prompt
 from cidoc.eval.baseline import Predictor
 from cidoc.eval.metrics import EvalItem
-from cidoc.labeling.labels import CATEGORIES, LABELS_FILENAME, Label, load_labels
+from cidoc.labeling.labels import CATEGORIES, DEV_SPLIT, LABELS_FILENAME, Label, load_labels
 from cidoc.llm.base import LLMProvider
+
+ALL_SPLITS = "all"
+"""`cidoc eval --split all`: every label, whatever its split."""
 
 
 @dataclass(frozen=True)
@@ -41,19 +44,23 @@ class Cases:
 
 
 def load_cases(
-    data_dir: Path, open_db: Callable[[], sqlite3.Connection], limit: int | None = None
+    data_dir: Path,
+    open_db: Callable[[], sqlite3.Connection],
+    limit: int | None = None,
+    split: str = DEV_SPLIT,
 ) -> Cases:
-    """Every non-skipped label (newest per job), in file order, with its stored log.
+    """Every non-skipped label (newest per job) in `split`, in file order, with its stored log.
 
-    Skips are never written to labels.jsonl; a record whose category is not in the
-    taxonomy is treated as skipped too.
+    `split` is "dev", "test" or "all"; the newest label decides a job's split. Skips are
+    never written to labels.jsonl; a record whose category is not in the taxonomy is
+    treated as skipped too.
     """
     newest: dict[int, Label] = {}
     for label in load_labels(data_dir / LABELS_FILENAME):
         if label.category in CATEGORIES:
             newest.pop(label.job_id, None)  # keep file order of the newest
             newest[label.job_id] = label
-    labels = list(newest.values())
+    labels = [lbl for lbl in newest.values() if split in (ALL_SPLITS, lbl.split)]
     if limit is not None:
         labels = labels[:limit]
     cases: list[EvalCase] = []

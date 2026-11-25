@@ -18,6 +18,7 @@ from cidoc.labeling.labels import (
     CATEGORY_HINTS,
     CATEGORY_KEYS,
     CONFIDENCE_LEVELS,
+    TEST_SPLIT,
     Label,
     append_label,
     parse_evidence,
@@ -261,6 +262,7 @@ def label_one(
     now: datetime,
     views: ViewToggle | None = None,
     hint: Hint | None = None,
+    split: str = TEST_SPLIT,
 ) -> Label | None:
     """Collect one label, or return None if skipped. Raises QuitRequestedError on quit.
 
@@ -299,6 +301,7 @@ def label_one(
         labeled_at=now.isoformat(),
         hint=hint.category if hint else None,
         hint_accepted=(category == hint.category) if hint else None,
+        split=split,
     )
 
 
@@ -368,6 +371,7 @@ def run_session(
     getch: Getch,
     ask: Ask,
     clock: Callable[[], datetime],
+    split: str = TEST_SPLIT,
 ) -> SessionResult:
     result = SessionResult()
     for index, c in enumerate(picks, start=1):
@@ -384,7 +388,7 @@ def run_session(
         render_header(console, c, index, len(picks))
         views.render()
         try:
-            label = label_one(console, getch, ask, c, view.total_lines, clock(), views, hint)
+            label = label_one(console, getch, ask, c, view.total_lines, clock(), views, hint, split)
         except QuitRequestedError:
             result.quit = True
             break
