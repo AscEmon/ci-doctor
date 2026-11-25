@@ -94,21 +94,22 @@ def test_limit_takes_the_first_labels(data_dir: Path) -> None:
 def test_load_cases_filters_by_split_using_the_newest_label(data_dir: Path) -> None:
     setup_jobs(data_dir)  # all dev
     store_job(data_dir, 4, log_text("Building flavor four"))
-    add_label(data_dir, 4, "other", split="test")
-    add_label(data_dir, 2, "dart_compile", split="test")  # relabeled into test
+    add_label(data_dir, 4, "other", split="test1")
+    add_label(data_dir, 2, "dart_compile", split="test1")  # relabeled into test1
 
     def ids(split: str) -> list[int]:
         return [c.label.job_id for c in load_cases(data_dir, opener(data_dir), split=split).cases]
 
     assert ids("dev") == [1, 3]
-    assert ids("test") == [4, 2]
+    assert ids("test1") == [4, 2]
+    assert ids("test2") == []
     assert ids("all") == [1, 3, 4, 2]
 
 
 def test_eval_defaults_to_dev_and_records_the_split(data_dir: Path) -> None:
     setup_jobs(data_dir)
     store_job(data_dir, 4, log_text("Building flavor four"))
-    add_label(data_dir, 4, "other", split="test")
+    add_label(data_dir, 4, "other", split="test1")
 
     result = run("--model", "regex-baseline")
 
@@ -122,17 +123,41 @@ def test_eval_defaults_to_dev_and_records_the_split(data_dir: Path) -> None:
 def test_eval_test_split(data_dir: Path) -> None:
     setup_jobs(data_dir)
     store_job(data_dir, 4, log_text("Building flavor four"))
-    add_label(data_dir, 4, "other", split="test")
+    add_label(data_dir, 4, "other", split="test1")
 
-    result = run("--model", "regex-baseline", "--split", "test")
+    result = run("--model", "regex-baseline", "--split", "test1")
 
     assert result.exit_code == 0, result.output
     saved = load_run(run_files(data_dir)[-1])
-    assert (saved.info.split, [item.job_id for item in saved.items]) == ("test", [4])
+    assert (saved.info.split, [item.job_id for item in saved.items]) == ("test1", [4])
 
 
 def test_eval_rejects_unknown_split(data_dir: Path) -> None:
     assert run("--split", "train").exit_code == 2
+    assert run("--split", "test").exit_code == 2  # renamed to test1
+
+
+def test_eval_test2_split(data_dir: Path) -> None:
+    setup_jobs(data_dir)
+    store_job(data_dir, 4, log_text("Building flavor four"))
+    add_label(data_dir, 4, "other", split="test2")
+
+    result = run("--model", "regex-baseline", "--split", "test2")
+
+    assert result.exit_code == 0, result.output
+    saved = load_run(run_files(data_dir)[-1])
+    assert (saved.info.split, [item.job_id for item in saved.items]) == ("test2", [4])
+
+
+def test_run_file_with_legacy_test_split_reads_as_test1(data_dir: Path) -> None:
+    setup_jobs(data_dir)
+    run("--model", "regex-baseline")
+    path = run_files(data_dir)[-1]
+    data = json.loads(path.read_text())
+    data["split"] = "test"
+    path.write_text(json.dumps(data))
+
+    assert load_run(path).info.split == "test1"
 
 
 def test_old_run_file_without_split_reads_as_dev(data_dir: Path) -> None:

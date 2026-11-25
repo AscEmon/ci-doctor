@@ -51,7 +51,7 @@ def load_cases(
 ) -> Cases:
     """Every non-skipped label (newest per job) in `split`, in file order, with its stored log.
 
-    `split` is "dev", "test" or "all"; the newest label decides a job's split. Skips are
+    `split` is "dev", "test1", "test2" or "all"; the newest label decides a job's split. Skips are
     never written to labels.jsonl; a record whose category is not in the taxonomy is
     treated as skipped too.
     """

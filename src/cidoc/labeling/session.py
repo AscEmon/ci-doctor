@@ -18,7 +18,7 @@ from cidoc.labeling.labels import (
     CATEGORY_HINTS,
     CATEGORY_KEYS,
     CONFIDENCE_LEVELS,
-    TEST_SPLIT,
+    TEST2_SPLIT,
     Label,
     append_label,
     parse_evidence,
@@ -262,7 +262,7 @@ def label_one(
     now: datetime,
     views: ViewToggle | None = None,
     hint: Hint | None = None,
-    split: str = TEST_SPLIT,
+    split: str = TEST2_SPLIT,
 ) -> Label | None:
     """Collect one label, or return None if skipped. Raises QuitRequestedError on quit.
 
@@ -371,7 +371,7 @@ def run_session(
     getch: Getch,
     ask: Ask,
     clock: Callable[[], datetime],
-    split: str = TEST_SPLIT,
+    split: str = TEST2_SPLIT,
 ) -> SessionResult:
     result = SessionResult()
     for index, c in enumerate(picks, start=1):

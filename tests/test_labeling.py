@@ -289,7 +289,7 @@ def test_session_labels_skips_and_retries_invalid_input(tmp_path: Path) -> None:
         confidence=3,
         log_path="logs/o__a/1.log.gz",
         labeled_at=NOW.isoformat(),
-        split="test",
+        split="test2",
     )
     assert (labels[1].job_id, labels[1].category, labels[1].confidence) == (
         3,
@@ -515,6 +515,25 @@ def test_label_without_split_field_reads_as_dev(tmp_path: Path) -> None:
     path.write_text(json.dumps(record) + "\n")
 
     assert load_labels(path)[0].split == "dev"
+
+
+def test_legacy_test_split_reads_as_test1(tmp_path: Path) -> None:
+    path = tmp_path / "labels.jsonl"
+    record = {
+        "job_id": 1,
+        "repo": "o/a",
+        "run_id": 1,
+        "category": "other",
+        "root_cause": "cause",
+        "evidence_lines": [1],
+        "confidence": 2,
+        "log_path": "logs/o__a/1.log.gz",
+        "labeled_at": NOW.isoformat(),
+        "split": "test",
+    }
+    path.write_text(json.dumps(record) + "\n")
+
+    assert load_labels(path)[0].split == "test1"
 
 
 def test_session_writes_the_requested_split(tmp_path: Path) -> None:

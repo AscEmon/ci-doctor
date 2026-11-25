@@ -17,6 +17,7 @@ from typing import Any
 from cidoc.analyze.analyzer import AnalysisResult
 from cidoc.analyze.cache import result_from_dict, result_to_dict
 from cidoc.eval.metrics import EvalItem, Metrics
+from cidoc.labeling.labels import normalize_split
 
 RUNS_DIRNAME = "eval_runs"
 FORMAT_VERSION = 1
@@ -38,8 +39,8 @@ class RunInfo:
     missing: list[int] = field(default_factory=list)
     """Labeled jobs whose log is gone; not scored."""
     split: str = "dev"
-    """Labels scored: "dev", "test" or "all". Runs saved before splits existed scored
-    every label, and all of those are read as "dev"."""
+    """Labels scored: "dev", "test1", "test2" or "all". Runs saved before splits existed
+    scored every label, and all of those are read as "dev"; a legacy "test" is "test1"."""
 
 
 @dataclass(frozen=True)
@@ -105,6 +106,7 @@ def load_run(path: Path) -> RunFile:
     data = json.loads(path.read_text(encoding="utf-8"))
     info_fields = set(RunInfo.__dataclass_fields__)
     info = RunInfo(**{k: v for k, v in data.items() if k in info_fields})
+    info = replace(info, split=normalize_split(info.split))
     return RunFile(
         info=info,
         items=[item_from_dict(item) for item in data["items"]],

@@ -40,10 +40,12 @@ Label failed jobs by hand with `uv run cidoc label`, and fix a label with
 [labeling guideline](docs/LABELING_GUIDELINE.md) for how to read a log, what each
 category means, and the ordered decision procedure for choosing one.
 
-Each label has a `split`. Labels written before splits existed are `dev`, which is
-the set the prompt is tuned on. New labels default to `test`, which is held out
-(`cidoc label --split dev` overrides this). `uv run cidoc eval` scores `dev` by
-default; use `--split test` or `--split all` for the others.
+Each label has a `split` (see the guideline's "Splits and integrity"): `dev` is
+what the prompt is tuned on, and labels written before splits existed are `dev`.
+`test1` is the first held-out batch, and new labels default to `test2`
+(`cidoc label --split dev|test1|test2` overrides this). `uv run cidoc eval` scores
+`dev` by default; use `--split test1`, `--split test2` or `--split all` for the
+others.
 
 ## Development checks
 

@@ -47,12 +47,21 @@ CATEGORY_HINTS: dict[str, str] = {
 
 CONFIDENCE_LEVELS = (1, 2, 3)
 
-# Which evaluation set a label belongs to. Labels written before splits existed have no
-# "split" field and are read as "dev": they were looked at while the prompt was tuned.
-# New labels default to "test", held out to measure the tuned prompt.
+# Which evaluation set a label belongs to (see the guideline's "Splits and integrity").
+# - dev: tunes the prompt and guideline. Labels written before splits existed have no
+#   "split" field and are read as "dev".
+# - test1: the first test batch; seen, reported as-is, never tuned on.
+# - test2: labeled after the guideline and prompt are frozen; the default for new labels.
 DEV_SPLIT = "dev"
-TEST_SPLIT = "test"
-SPLITS = (DEV_SPLIT, TEST_SPLIT)
+TEST1_SPLIT = "test1"
+TEST2_SPLIT = "test2"
+SPLITS = (DEV_SPLIT, TEST1_SPLIT, TEST2_SPLIT)
+LEGACY_SPLITS = {"test": TEST1_SPLIT}
+"""Old split names and what they are read as: the single "test" batch became test1."""
+
+
+def normalize_split(split: str) -> str:
+    return LEGACY_SPLITS.get(split, split)
 
 
 @dataclass(frozen=True)
@@ -77,7 +86,7 @@ class Label:
     edited_at: str | None = None
     """When the label was last changed with `cidoc label edit`; None if never."""
     split: str = DEV_SPLIT
-    """Evaluation set ("dev" or "test"); a missing field is read as "dev"."""
+    """Evaluation set (one of SPLITS); missing is read as "dev", legacy "test" as "test1"."""
 
 
 def label_from_record(record: dict[str, Any]) -> Label:
@@ -86,7 +95,10 @@ def label_from_record(record: dict[str, Any]) -> Label:
     Raises TypeError if a required field is missing, AttributeError if not an object.
     """
     known = {f.name for f in fields(Label)}
-    return Label(**{k: v for k, v in record.items() if k in known})
+    values = {k: v for k, v in record.items() if k in known}
+    if isinstance(values.get("split"), str):
+        values["split"] = normalize_split(values["split"])
+    return Label(**values)
 
 
 def load_labels(path: Path, on_bad_line: Callable[[int], None] | None = None) -> list[Label]:

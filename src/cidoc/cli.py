@@ -43,7 +43,7 @@ from cidoc.labeling.labels import (
     DEV_SPLIT,
     LABELS_FILENAME,
     SPLITS,
-    TEST_SPLIT,
+    TEST2_SPLIT,
     LabelNotFoundError,
     find_label,
     load_labels,
@@ -138,7 +138,7 @@ def eval_command(
     ] = None,
     split: Annotated[
         str,
-        typer.Option(help="Which labels to score: dev, test or all (missing split = dev)."),
+        typer.Option(help="Which labels to score: dev, test1, test2 or all (missing = dev)."),
     ] = DEV_SPLIT,
     refresh: Annotated[
         bool, typer.Option("--refresh", help="Ignore cached results and call the API again.")
@@ -815,8 +815,8 @@ def label(
     ] = False,
     split: Annotated[
         str,
-        typer.Option(help="Split recorded on this session's new labels: dev or test."),
-    ] = TEST_SPLIT,
+        typer.Option(help="Split recorded on this session's new labels: dev, test1 or test2."),
+    ] = TEST2_SPLIT,
 ) -> None:
     """Label unlabeled failures by hand; answers are appended to labels.jsonl."""
     if ctx.invoked_subcommand is not None:
