@@ -38,7 +38,7 @@
 Label failed jobs by hand with `uv run cidoc label`, and fix a label with
 `uv run cidoc label edit <job_id>` (or `--last`). Follow the
 [labeling guideline](docs/LABELING_GUIDELINE.md) for how to read a log, what each
-category means, and the tie-break rules.
+category means, and the ordered decision procedure for choosing one.
 
 Each label has a `split`. Labels written before splits existed are `dev`, which is
 the set the prompt is tuned on. New labels default to `test`, which is held out

@@ -1,280 +1,220 @@
-# Labeling guideline
+# CI Doctor Labeling Guideline (v3)
 
-How to label a failed CI job with `cidoc label`. The goal is one category per job that
-names the **root cause**, the first thing that went wrong, not the last thing that
-printed an error.
+This guideline defines how to label one failed GitHub Actions job. Human labelers and the
+analyzer prompt both use it, so every rule here must be decidable from the log (plus the
+fix commit when stated).
 
-Labels are written to `data/labels.jsonl`. Fix mistakes with
-`cidoc label edit <job_id>` or `cidoc label edit --last`.
+**Changes in v3**
+- New category `store_release`.
+- Clear boundary between `signing_secrets` and `ci_config`.
+- `other` narrowed to "clear cause, truly no category".
+- Categories are now chosen with an **ordered decision procedure**: the first matching
+  rule wins. This removes most overlaps.
 
-## Scope
+---
 
-**In scope:** jobs that build, test, analyze, package, sign or publish the app.
+## 1. Before labeling: scope and visibility
 
-**Out of scope: skip them** (press `s`):
+**Skip (`s`) when the job is out of scope:**
+- PR or issue hygiene bots: semantic PR title, labeler, stale, welcome, add-to-project.
+- Aggregator jobs that only read `needs.*.result` and exit.
+- Jobs that run no Flutter, Dart, Android, iOS, or macOS/Windows/Linux app tooling are in
+  scope for labeling but are marked by the `stack` field and reported separately.
 
-- PR hygiene bots: PR title validation, labelers, stale/first-interaction bots,
-  release drafters, PR size labelers.
-- Issue bots: anything triggered by issue activity or adding items to project boards.
-- Aggregator jobs (`ci-success`, `all-green`, `gate`, `result`, `check`, ...) whose
-  only failing step reads the results of other jobs and exits. The root cause is in
-  the job that actually failed, not here.
+**Skip (`s`) when the cause is not visible:** the log does not show why the step failed,
+and the fix commit does not make it clear. Do not guess. Skip is not a failure; a wrong
+label is.
 
-Mining and `cidoc mine prune` already drop most of these automatically. Skip any that
-slip through.
+---
 
-## How to read a log
+## 2. How to read a log
 
-1. **Find `##[error]`.** `cidoc label` opens on the failed step (the focus view) with
-   error markers highlighted (`##[error]`, `FAILURE:`, `error:`, `❌`, `[!]`,
-   `** BUILD FAILED **`, `fastlane finished with errors`, ...). Press `f` for the full
-   view (error snippets plus the last 120 lines).
-2. **Read upward from the first `##[error]`.** The `##[error]` line itself is usually
-   just `Process completed with exit code 1.`. The cause is in the lines above it:
-   Gradle's `* What went wrong:` block, the first `error:` from the compiler, the first
-   failing test, the pub solver message.
-3. **Ignore everything after `Post job cleanup.`** Cleanup steps (cache saves, git
-   config resets) run after the failure and their errors are never the cause. The
-   focus view already hides them.
-4. **Check whether earlier steps succeeded.** If checkout, setup or `pub get` failed,
-   that is the root cause even when a later step printed more errors. Composite steps
-   that finished with `outcome=success` are hidden in the focus view; a step you can
-   see either failed or has no recorded outcome.
-5. **Label the first distinct error.** Repeated identical errors (the same compile
-   error in every test file, the same missing symbol in every target) are a cascade
-   from one cause. Label that cause, and cite its first occurrence as evidence.
-6. **Use the hint as a hint.** A `hint:` line above the prompt is a regex match, not a
-   verdict. It never fills in the category. Decide from the log, then type the key.
-7. **Cite evidence.** Evidence line numbers are the numbers in the left gutter: the
-   lines that show the root cause, usually 1 to 3 of them.
+1. Find `##[error]`. It is usually just "Process completed with exit code 1". The cause is
+   above it.
+2. Ignore everything after `Post job cleanup.`
+3. Check that earlier steps succeeded. A warning in a successful step is not the cause.
+4. Repeated identical errors are a cascade. Label the **first distinct** error.
+5. These are **never** root causes on their own:
+   - "N packages have newer versions", per-package `x (y available)` lines, "discontinued"
+   - "Welcome to Flutter" analytics banner
+   - `Target Integrity (Xcode)` and `Warning (Xcode)` lines
+   - Deprecation warnings (Node, Gradle, Kotlin), unless a lint step fails on them
+   - fastlane's update changelog ("To see all new releases", "Please update using")
+   - Log lines marked ERROR that say "Skipping", "optional", or "continuing"
+6. `***` is GitHub's secret mask. `[REDACTED:...]` is ours. Neither is a cause by itself.
+7. For retries: the same failure on every attempt means a real problem; different
+   failures across attempts mean `infra_flaky`.
 
-### Never a root cause
+---
 
-These look like problems but never fail a job. Keep reading past them:
+## 3. Decision procedure (first match wins)
 
-- `Target Integrity (Xcode)` and `Warning (Xcode)` lines.
-- `pub get` reporting "N packages have newer versions incompatible with dependency
-  constraints" (or any "newer versions available" note).
-- Deprecation warnings.
-- fastlane's "fastlane X is available" notice and its release notes ("To see all new
-  releases", "Please update using"). The focus view hides it and shows the 40 lines
-  above it, where fastlane's actual error is.
+Ask these questions **in order**. Stop at the first "yes".
 
-## Categories
+| # | Question | Category |
+|---|---|---|
+| 1 | Did a **store or registry reject an upload or publish**? | `store_release` |
+| 2 | Is a **credential's value** missing, empty, invalid, expired, or denied? | `signing_secrets` |
+| 3 | Did something **outside the repo fail temporarily**? | `infra_flaky` |
+| 4 | Did the job or step hit a **time, memory, or disk limit**? | `timeout_resource` |
+| 5 | Is a **tool or runtime the wrong version**, or did a **tool upgrade** break it with no code change? | `toolchain_version` |
+| 6 | Is a **dependency** missing, conflicting, out of sync, or API-mismatched? | `dependency_resolution` |
+| 7 | Is the **workflow file, a CI script, or runner setup** itself wrong? | `ci_config` |
+| 8 | Is the **Gradle / Android Gradle Plugin configuration** wrong? | `gradle_agp_config` |
+| 9 | Is the **Xcode / CocoaPods project** setup or linking wrong? | `ios_build` |
+| 10 | Did **Kotlin, Java, C, C++, Swift, or Objective-C code** fail to compile? | `native_compile` |
+| 11 | Did **Dart code** fail to compile? | `dart_compile` |
+| 12 | Did **analyze, lint, or format** fail? | `analyzer_lint` |
+| 13 | Did a **test run and fail**? | `test_failure` |
+| 14 | The cause is clear but none of the above fit. | `other` |
 
-Key in brackets. Each has one definition and one typical error line.
+Why the order matters: a test that fails because the emulator crashed is `infra_flaky`
+(rule 3), not `test_failure` (rule 13). A compile error caused by a new compiler is
+`toolchain_version` (rule 5), not `native_compile` (rule 10).
 
-### `dependency_resolution` [1]
+---
 
-A pub package or Gradle/Maven artifact cannot be resolved: the requested version
-truly does not exist, or version constraints conflict. Also a dependency that resolved
-but has a mismatched API (a missing type or symbol) where the fix is changing its
-version.
+## 4. Category definitions and boundaries
 
-```
-Because app depends on intl ^0.19.0 which doesn't match any versions, version solving failed.
-```
+### `store_release`
+A store or package registry **rejected** the upload or publish of an already built
+artifact.
+- Google Play: "Version code N has already been used", invalid bundle, policy rejection.
+- App Store Connect / TestFlight: `ERROR ITMS-90xxx`, duplicate build number, missing
+  export compliance.
+- pub.dev: "Version X of package Y already exists".
+- **Not this:** the store rejected the **login or API key** → `signing_secrets`.
 
-### `gradle_agp_config` [2]
+### `signing_secrets`
+The **value** of a credential is the problem: a signing certificate, keystore,
+provisioning profile, store API key, or CI secret is missing, empty, invalid, expired,
+or has no access.
+- "Keystore file not found", "No signing certificate", "could not read Username" when
+  cloning a certificates repo, "Invalid API Key", 401/403 from a store or signing service.
+- An env var that should hold a secret is empty (`KEY_PASSWORD:` with no `***`).
 
-An error in Gradle or Android Gradle Plugin configuration or DSL (build scripts,
-plugin setup, namespace), where the required artifacts were found.
+**Boundary with `ci_config` (the most common confusion):**
+- Ask: *"Would fixing this require changing a secret's value or access in the repo/account
+  settings?"* → `signing_secrets`.
+- Ask: *"Would fixing this require editing the workflow file or a script?"* → `ci_config`.
+- If the log cannot tell you which, choose `signing_secrets` with confidence 2.
 
-```
-Namespace not specified. Specify a namespace in the module's build file.
-```
+### `infra_flaky`
+Something **outside the repository** failed temporarily. A re-run would most likely pass.
+- HTTP 429, 5xx, "Too Many Requests", "Service Unavailable"
+- Timeouts or connection errors talking to a server: `ETIMEDOUT`, `ECONNRESET`, DNS failure
+- Registry, CDN, or GitHub-side errors: `remote: error`, `remote: fatal`, "Could not parse
+  POM", CocoaPods CDN clone failure
+- Corrupted or missing files inside a local Gradle, pub, or CocoaPods **cache**
+- Runner crash, emulator failed to boot, "The runner has received a shutdown signal"
+- **Not this:** HTTP **404** (the resource does not exist) → `dependency_resolution` or
+  `ci_config`. Authentication errors → `signing_secrets`.
 
-### `native_compile` [3]
+### `timeout_resource`
+The job or step hit a **platform limit**: maximum execution time, out of memory, no space
+left on device.
+- **Not this:** one test timing out inside a passing test runner → `test_failure`, unless
+  it is waiting on a network service → `infra_flaky`.
 
-Kotlin, Java, C or C++ code failed to compile (app or plugin native code).
-
-```
-e: file:///home/runner/work/app/android/app/src/main/kotlin/MainActivity.kt:12:5 Unresolved reference: foo
-```
-
-### `dart_compile` [4]
-
-Dart code failed to compile during a build or test run.
-
-```
-lib/main.dart:14:7: Error: The method 'fetchUser' isn't defined for the class 'ApiClient'.
-```
-
-### `analyzer_lint` [5]
-
-`flutter analyze`, `dart analyze` or `dart format` reported issues and the step failed
-because of them.
-
-```
-   info • Unused import: 'package:flutter/foundation.dart' • lib/main.dart:3:8 • unused_import
-```
-
-### `test_failure` [6]
-
-A unit, widget, golden or integration test ran and failed.
-
-```
-00:42 +118 -1: Some tests failed.
-```
-
-### `signing_secrets` [7]
-
-A signing certificate, keystore, provisioning profile or CI secret is missing,
-invalid, expired or not readable.
-
-```
-> Keystore file '/home/runner/work/app/android/app/upload.jks' not found for signing config 'release'.
-```
-
-### `toolchain_version` [8]
-
-A tool or runtime is not the version the project, a dependency or the workflow
-requires. Covers any tool: Flutter, Dart, Java, Xcode, AGP, Gradle, Python, Node,
+### `toolchain_version`
+A tool or runtime is **not the version** the project, a dependency, or the workflow
+requires, **or** a tool upgrade broke the build while the project code did not change.
+Covers Flutter, Dart, Java, Kotlin plugin, Gradle, AGP, Xcode, CocoaPods, Python, Node,
 Ruby, Go, Rust, CMake, MSVC.
+- "requires Java 17", "Gradle version lower than Flutter's minimum supported"
+- iOS deployment target below what the installed Xcode supports
+- A compiler error from a feature the new compiler removed (e.g. MSVC `STL1011`
+  `<experimental/coroutine>`)
+- `version solving failed` because the CI's Flutter/Dart SDK is too old (normal build job)
+- The workflow's own version-check script fails
+- Fails only on Flutter master/beta while stable passes (when known)
 
-```
-Android Gradle plugin requires Java 17 to run. You are currently using Java 11.
-```
+### `dependency_resolution`
+A pub, Gradle/Maven, or CocoaPods **dependency** is the problem.
+- The requested version does not exist; version constraints conflict
+- `pubspec.lock` out of sync (`--enforce-lockfile`)
+- A third-party artifact download returns **404**
+- A dependency resolved, but its API does not match (missing type, method, or native
+  symbol), and the fix is changing its version
+- A deliberate minimum-version job (`pub downgrade`) fails because `pubspec.yaml`
+  constraints are wrong
 
-### `ios_build` [9]
+### `ci_config`
+The **workflow file, a CI script, or the runner setup** is wrong. The app code and the
+standard tools are fine.
+- The workflow calls a file or script that does not exist; missing `actions/checkout`
+- A required system package is not installed (e.g. GTK dev packages for a native hook)
+- A token exists but the workflow or script does not pass it on
+- An invalid CI data or config file (e.g. a YAML file read by a CI script)
+- Project CI scripts out of sync (overlay digest mismatch)
 
-An iOS or macOS build failed in CocoaPods or Xcode (including linking) for a reason
-other than signing or a toolchain version.
+### `gradle_agp_config`
+An error in Gradle or Android Gradle Plugin **configuration**, where the artifacts were
+found: DSL errors, plugin apply errors, namespace not set, inconsistent JVM targets
+between Java and Kotlin tasks.
 
-```
-[!] CocoaPods could not find compatible versions for pod "Firebase/CoreOnly"
-```
+### `ios_build`
+An Xcode or CocoaPods **project** problem that is not signing and not a toolchain version:
+CocoaPods version conflicts, missing pods, linker errors from a missing system library or
+framework (e.g. `libresolv`), Xcode project settings.
 
-### `infra_flaky` [0]
+### `native_compile`
+Kotlin, Java, C, C++, Swift, or Objective-C **source code** failed to compile, and the fix
+is a code change.
 
-The failure came from the CI environment rather than the code: network errors, HTTP
-429/5xx, timeouts talking to a server, runner crashes, cache download failures, git
-remote errors, or anything a plain re-run fixed.
+### `dart_compile`
+Dart code failed to compile during a build or test run, and the fix is a Dart code change.
 
-```
-Error: read ECONNRESET
-```
+### `analyzer_lint`
+`flutter analyze`, `dart analyze`, or `dart format` failed the step.
+- Check the flags: with `--no-fatal-infos`, only warnings and errors are fatal.
+- Deprecation lints that appear after an SDK upgrade are still `analyzer_lint`.
+- Evidence = only issues at a fatal level.
 
-### `timeout_resource` [t]
+### `test_failure`
+A unit, widget, golden, integration, or end-to-end test **ran and failed** because of the
+project's code or test code.
+- Same assertion failing on every retry.
+- **Not this:** the test environment failed (emulator, network, backend down) →
+  `infra_flaky`. The test file did not compile → `dart_compile` or
+  `dependency_resolution`.
 
-The job or a step hit a time limit, or ran out of memory or disk.
+### `other`
+The cause is **clear**, but no category above fits. Examples: a project-defined quality
+gate (binary size budget, coverage threshold, generated-code drift check).
+- If the cause is not clear, use **skip**, not `other`.
+- Always describe the cause precisely in the root cause text.
 
-```
-##[error]The job running on runner GitHub Actions 12 has exceeded the maximum execution time of 60 minutes.
-```
+---
 
-### `ci_config` [c]
+## 5. Root cause text
 
-The workflow file, CI scripts, or runner setup is missing or wrong: required system
-packages not installed, secrets/tokens not passed to a script, invalid CI data/config
-files, project CI scripts out of sync, or the workflow calling a missing file.
+- One sentence, at most 200 characters.
+- Pattern: **`<what failed>: <why it failed>`**
+  - Good: `Gradle could not resolve kotlin-stdlib 2.0.21: Maven Central returned HTTP 429`
+  - Bad: `package update issue generate`, `cocoapods issue`
+- Name the file, package, tool, or version involved.
+- Never paste instructions or notes into this field.
 
-```
-./scripts/ci/build.sh: line 4: ./scripts/ci/prepare.sh: No such file or directory
-```
+## 6. Evidence lines
 
-### `other` [o]
+- 1 to 4 line numbers that show the root cause directly.
+- Prefer the first distinct error line over its repetitions.
+- Do not include noise lines (see section 2.5).
 
-The root cause is clear in the log but fits none of the categories above. Describe it
-precisely in the root cause line.
+## 7. Confidence
 
-```
-ERROR ITMS-90189: "Redundant Binary Upload. You've already uploaded a build with build number '42'."
-```
+| Value | Use when |
+|---|---|
+| 3 | The log alone proves both the cause and the category. |
+| 2 | The cause is clear, but the category depends on something not in the log (for example, whether a re-run passed). Check the fix commit when possible. |
+| 1 | You know what failed but are guessing the category. Keep this under 10% of labels. |
 
-## Specific cases
+## 8. Splits and integrity
 
-These cases come up often enough to settle once. Each one overrides the category
-definitions and the tie-break rules below. `cidoc analyze` and `cidoc eval` copy this
-list into the model's instructions, so keep each case to one bullet.
-
-- A compile error caused by a feature that a newer compiler or SDK removed or
-  deprecated, with no code change (e.g. MSVC `STL1011` for
-  `<experimental/coroutine>`) → `toolchain_version`, not `native_compile`.
-- An iOS/macOS deployment target or minimum OS version below what the installed Xcode
-  supports → `toolchain_version`.
-- Corrupted or missing files inside a local Gradle, pub or CocoaPods cache →
-  `infra_flaky`.
-- HTTP 404 means the resource does not exist → never `infra_flaky`.
-- A project-defined gate (binary size budget, coverage threshold) failed → `other`.
-- A runtime "symbol not found" or missing type caused by a dependency version
-  mismatch, where nothing failed to compile → `dependency_resolution`.
-
-## Tie-break rules
-
-When more than one category seems to fit, apply the first rule that matches.
-
-1. **Out of scope** (PR/issue bots, aggregator jobs) → **skip**.
-2. **Signing:** a missing, invalid or expired signing cert, keystore, provisioning
-   profile or secret → `signing_secrets`, even on iOS or Android jobs (not `ios_build`,
-   not `gradle_agp_config`).
-   - The secret exists but the workflow does not pass it to the step (missing `env:`
-     or `with:` wiring) → `ci_config`.
-3. **Artifact or package download failed transiently:** HTTP 429 or 5xx, a timeout,
-   `Could not GET '...'`, `Could not parse POM` → `infra_flaky`. A 404 is not
-   transient (see [Specific cases](#specific-cases)).
-4. **Version truly missing or constraints conflict** → `dependency_resolution`. So is
-   a resolved dependency with a mismatched API (missing type or symbol) that is fixed
-   by changing its version.
-5. **`version solving failed` because of the SDK version:**
-   - the CI's Flutter/Dart is simply too old → `toolchain_version`;
-   - a deliberate minimum-version job (e.g. `pub downgrade`) and the fix was in
-     `pubspec.yaml` → `dependency_resolution`.
-6. **Compile error caused by a runner compiler or SDK upgrade** (the code did not
-   change) → `toolchain_version`.
-7. **Any tool/runtime version mismatch** → `toolchain_version`, including a workflow's
-   own version guard (a step that checks a version and exits).
-8. **Gradle/AGP config or DSL error where the artifacts were found** →
-   `gradle_agp_config`.
-9. **Xcode `Undefined symbol` / linker error from a missing system library** →
-   `ios_build`.
-10. **`flutter analyze` / `dart analyze` / `dart format` failures** → `analyzer_lint`.
-    Check the flags (`--fatal-infos`, `--fatal-warnings`, `--no-fatal-*`) to see which
-    levels fail the step, and cite as evidence only issues at a fatal level.
-11. **Workflow, CI script or runner setup problem** → `ci_config` (see its
-    definition).
-12. **Network, 5xx, runner crash, cache download failure, `remote: error` /
-    `remote: fatal` on git push or fetch, or fixed by a plain re-run** →
-    `infra_flaky`.
-13. **Cause clear but no category fits** → `other`. **Cause not visible in the log**
-    (reporter steps, a log cut short) → **skip**.
-14. **Still ambiguous** → check the `fix_sha` commit (below). Use confidence 2 when
-    unsure, and 3 only when the log alone is conclusive.
-
-### `other` candidates to watch
-
-When labeling `other`, note in the root cause if it matches one of these. If they
-keep coming up they may become categories:
-
-- **`store_release`:** a store or registry upload rejected because the version or
-  build already exists (App Store `ERROR ITMS-90189`, Play Console "Version code
-  already used", pub.dev "version already exists").
-- **`quality_gate`:** a size, coverage or similar threshold check failed (labeled
-  `other`, see [Specific cases](#specific-cases)).
-
-## Confidence
-
-| Value | Meaning |
-| ----- | ------- |
-| 3 | The log alone is conclusive: the evidence lines show the root cause. |
-| 2 | Most likely right, but you are unsure or relied on the fix commit. |
-| 1 | A guess. Prefer skipping (`s`) if the log does not show the cause. |
-
-## Checking the fix commit
-
-`fix_sha` is the head commit of the next successful run of the same workflow on the
-same branch. The diff between the failing commit and it often shows what was fixed.
-It is not in the label header yet; look it up in the database:
-
-```sh
-sqlite3 data/cidoc.db "SELECT repo, head_sha, fix_sha FROM failures WHERE job_id = <job_id>"
-```
-
-Then open `https://github.com/<repo>/compare/<head_sha>...<fix_sha>`.
-
-- `fix_sha` equal to `head_sha`: a re-run passed with no code change, which points to
-  `infra_flaky`.
-- A diff that only bumps versions in `pubspec.yaml`, `build.gradle` or `.tool-versions`
-  points to `dependency_resolution` or `toolchain_version` (rules 4 to 7 decide which).
-- A diff that only touches `.github/workflows/` or CI scripts points to `ci_config`.
-- No `fix_sha`: nothing passed later on that branch yet; decide from the log alone.
+- `dev`: used to tune prompts and this guideline. Labels may be re-checked.
+- `test1`: the first test batch. It has been seen; it is reported as-is and never tuned on.
+- `test2`: the next test batch, labeled **after** this guideline and the prompt are frozen.
+  Evaluated once.
+- When re-checking any label, decide from the log and this guideline only, never from the
+  model's prediction. Record a reason in the root cause text.
