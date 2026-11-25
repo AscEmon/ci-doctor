@@ -151,6 +151,21 @@ def hint_of(*lines: str) -> Hint | None:
             "infra_flaky",
             "ECONNRESET",
         ),
+        (
+            ["Google Api Error: Invalid request - Version code 42 has already been used."],
+            "store_release",
+            "has already been used",
+        ),
+        (
+            ['ERROR ITMS-90189: "Redundant Binary Upload. You\'ve already uploaded a build."'],
+            "store_release",
+            "ERROR ITMS-",
+        ),
+        (
+            ["$ dart pub publish --force", "Version 1.2.0 of package foo already exists."],
+            "store_release",
+            "already exists",
+        ),
     ],
 )
 def test_each_pattern(lines: list[str], category: str, matched: str) -> None:
@@ -162,6 +177,8 @@ def test_each_pattern(lines: list[str], category: str, matched: str) -> None:
 
 def test_every_rule_has_a_fixture() -> None:
     assert [rule.category for rule in RULES] == [
+        "store_release",
+        "store_release",
         "dependency_resolution",
         "analyzer_lint",
         "signing_secrets",
@@ -295,6 +312,26 @@ def test_no_hint(line: str) -> None:
 
 def test_analyzer_issue_before_the_analyze_command_does_not_count() -> None:
     assert hint_of("info • stale message", "Run flutter analyze", "No issues found!") is None
+
+
+def test_already_exists_without_publish_or_upload_nearby_is_no_hint() -> None:
+    assert hint_of("fatal: destination path 'app' already exists and is not empty.") is None
+
+
+def test_already_exists_far_from_upload_is_no_hint() -> None:
+    lines = ["Uploading artifact", *(["building..."] * 11), "Error: tag v1.0.0 already exists"]
+
+    assert hint_of(*lines) is None
+
+
+def test_store_release_wins_over_signing_in_an_upload_log() -> None:
+    hint = hint_of(
+        "Uploading to App Store Connect with code signing identity 'Apple Distribution'",
+        'ERROR ITMS-90062: "This bundle is invalid."',
+    )
+
+    assert hint is not None
+    assert hint.category == "store_release"
 
 
 def test_first_rule_in_order_wins_and_line_number_is_reported() -> None:

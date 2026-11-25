@@ -97,13 +97,19 @@ def test_ci_config_is_on_key_c_and_no_category_was_removed() -> None:
     assert set(ORIGINAL_CATEGORIES) < set(CATEGORIES)
     assert tuple(CATEGORY_KEYS.values()) == CATEGORIES
     # Keys of existing categories are unchanged, so muscle memory still works.
-    assert {k: v for k, v in CATEGORY_KEYS.items() if v != "ci_config"} == dict(
+    added = {"ci_config", "store_release"}
+    assert {k: v for k, v in CATEGORY_KEYS.items() if v not in added} == dict(
         zip("1234567890to", ORIGINAL_CATEGORIES, strict=True)
     )
 
 
 def test_ci_config_key_does_not_clash_with_session_keys() -> None:
     assert "c" not in {SKIP_KEY, TOGGLE_VIEW_KEY, *QUIT_KEYS}
+
+
+def test_store_release_is_on_key_r_without_clashing() -> None:
+    assert CATEGORY_KEYS["r"] == "store_release"
+    assert "r" not in {SKIP_KEY, TOGGLE_VIEW_KEY, *QUIT_KEYS}
 
 
 def test_menu_lists_ci_config() -> None:

@@ -6,9 +6,8 @@
   these tags is defused so the data cannot close its block early.
 - The task is restated after the data, so the last words the model reads are ours.
 - No tools or function calling: the provider sends none, so the model can only answer.
-- Category definitions and the "Specific cases" rules are read at runtime from
-  docs/LABELING_GUIDELINE.md, the same text human labelers follow. Its hash is part of
-  the prompt version.
+- Category definitions are read at runtime from docs/LABELING_GUIDELINE.md, the same
+  text human labelers follow. Its hash is part of the prompt version.
 """
 
 import hashlib
@@ -25,8 +24,8 @@ from cidoc.labeling.labels import CATEGORIES
 GUIDELINE_PATH = Path(__file__).resolve().parents[3] / "docs" / "LABELING_GUIDELINE.md"
 HASH_CHARS = 12
 
-_CATEGORIES = "## Categories"
-_SPECIFIC_CASES = "## Specific cases"
+# v3: "## 4. Category definitions and boundaries".
+_CATEGORIES = re.compile(r"^## (?:\d+\. )?Category definitions\b")
 _CATEGORY_HEADING = re.compile(r"^### `([a-z_]+)`")
 _SECTION_END = re.compile(r"^#{1,3} ")
 # Also "< /ci_log", "</ CI_LOG >": a model may read loose spellings as our tags.
@@ -62,9 +61,6 @@ How to find the root cause:
 Categories (choose exactly one):
 {categories}
 
-Specific cases (these override the definitions above):
-{specific_cases}
-
 Answer with one JSON object matching the response schema: category, root_cause (one
 sentence, at most {root_cause_max} characters), evidence_lines, suggested_fix (a concrete
 next step), confidence (0 to 1: how sure you are that the category and cause are right)."""
@@ -86,8 +82,8 @@ class GuidelineError(ValueError):
 
 
 def parse_category_definitions(markdown: str) -> dict[str, str]:
-    """`category` -> its definition and example line, from the ### sections under
-    "## Categories" (other sections may mention categories in their headings too)."""
+    """`category` -> its definition and examples, from the ### sections under
+    "## N. Category definitions ..." (other sections may mention categories too)."""
     definitions: dict[str, str] = {}
     current: str | None = None
     body: list[str] = []
@@ -97,7 +93,7 @@ def parse_category_definitions(markdown: str) -> dict[str, str]:
             definitions[current] = _condense(body)
 
     lines = markdown.splitlines()
-    start = next((i + 1 for i, line in enumerate(lines) if line.strip() == _CATEGORIES), None)
+    start = next((i + 1 for i, line in enumerate(lines) if _CATEGORIES.match(line)), None)
     if start is None:
         return {}
     for line in lines[start:]:
@@ -111,23 +107,6 @@ def parse_category_definitions(markdown: str) -> dict[str, str]:
             body.append(line)
     finish()
     return definitions
-
-
-def parse_specific_cases(markdown: str) -> list[str]:
-    """The bullets under "## Specific cases", each joined onto one line."""
-    lines = markdown.splitlines()
-    start = next((i + 1 for i, line in enumerate(lines) if line.strip() == _SPECIFIC_CASES), None)
-    if start is None:
-        return []
-    cases: list[list[str]] = []
-    for line in lines[start:]:
-        if line.startswith("#"):
-            break
-        if line.startswith("- "):
-            cases.append([line[2:].strip()])
-        elif cases and line.startswith("  ") and line.strip():
-            cases[-1].append(line.strip())
-    return [" ".join(parts) for parts in cases]
 
 
 def _condense(lines: list[str]) -> str:
@@ -179,15 +158,8 @@ def build_prompt(guideline: str) -> Prompt:
         raise GuidelineError(
             f"guideline categories differ from the taxonomy: missing {missing}, unknown {unknown}"
         )
-    specific_cases = parse_specific_cases(guideline)
-    if not specific_cases:
-        raise GuidelineError(f'guideline has no bullets under "{_SPECIFIC_CASES}"')
     categories = "\n".join(f"- {name}: {definitions[name]}" for name in CATEGORIES)
-    system = SYSTEM_TEMPLATE.format(
-        categories=categories,
-        specific_cases="\n".join(f"- {case}" for case in specific_cases),
-        root_cause_max=ROOT_CAUSE_MAX_CHARS,
-    )
+    system = SYSTEM_TEMPLATE.format(categories=categories, root_cause_max=ROOT_CAUSE_MAX_CHARS)
     guideline_hash = _short_hash(guideline)
     payload = json.dumps(
         {

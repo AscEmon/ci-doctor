@@ -27,6 +27,7 @@ CATEGORY_KEYS: dict[str, str] = {
     "0": "infra_flaky",
     "t": "timeout_resource",
     "c": "ci_config",  # added in the Phase 0 wrap-up, after the first 44 labels
+    "r": "store_release",  # added with guideline v3
     "o": "other",
 }
 
@@ -41,6 +42,7 @@ CATEGORY_HINTS: dict[str, str] = {
     "ios_build": "cocoapods/xcode",
     "infra_flaky": "network, runner, cache",
     "ci_config": "workflow, CI scripts, runner setup, secrets not passed",
+    "store_release": "store/registry rejected the upload",
 }
 
 CONFIDENCE_LEVELS = (1, 2, 3)

@@ -28,6 +28,8 @@ class HintRule:
     pattern: re.Pattern[str]
     after: re.Pattern[str] | None = None
     """If set, only match on lines after the first line matching this."""
+    near: re.Pattern[str] | None = None
+    """If set, only match when a line within NEAR_LINES (either side) matches this."""
 
 
 @dataclass(frozen=True)
@@ -42,7 +44,14 @@ def _rx(pattern: str) -> re.Pattern[str]:
     return re.compile(pattern, re.IGNORECASE)
 
 
+NEAR_LINES = 10
+
 RULES: tuple[HintRule, ...] = (
+    # First, like rule 1 of the guideline's decision procedure: an upload rejection log
+    # also mentions signing, versions and HTTP errors. "already exists" alone is too
+    # common (files, tags, directories), so it needs a publish/upload nearby.
+    HintRule("store_release", _rx(r"has already been used|ERROR ITMS-")),
+    HintRule("store_release", _rx(r"already exists"), near=_rx(r"publish|upload")),
     # pub, then Gradle/Maven artifacts that could not be resolved or downloaded. First, so
     # it wins over gradle_agp_config: Gradle wraps resolution failures in config errors.
     HintRule(
@@ -90,6 +99,12 @@ RULES: tuple[HintRule, ...] = (
 MAX_MATCH_CHARS = 60
 
 
+def _near(lines: list[str], n: int, pattern: re.Pattern[str]) -> bool:
+    """Whether a line within NEAR_LINES of 1-based line `n` (itself included) matches."""
+    window = lines[max(0, n - 1 - NEAR_LINES) : n + NEAR_LINES]
+    return any(pattern.search(line) for line in window)
+
+
 def find_hint(lines: list[str], search: Iterable[int]) -> Hint | None:
     """First rule (in RULES order) matching any of the 1-based line numbers in `search`."""
     numbers = sorted(set(search))
@@ -107,7 +122,7 @@ def find_hint(lines: list[str], search: Iterable[int]) -> Hint | None:
             if any(marker in lines[n - 1] for marker in NON_ERROR_MARKERS):
                 continue  # e.g. "Warning (Xcode): ... xcodebuild ..." is not an ios_build cause
             match = rule.pattern.search(lines[n - 1])
-            if match:
+            if match and (rule.near is None or _near(lines, n, rule.near)):
                 return Hint(rule.category, match.group(0)[:MAX_MATCH_CHARS], n)
     return None
 
