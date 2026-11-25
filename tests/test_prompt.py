@@ -10,6 +10,7 @@ from cidoc.analyze.prompt import (
     defuse_tags,
     load_prompt,
     parse_category_definitions,
+    parse_specific_cases,
 )
 from cidoc.labeling.labels import CATEGORIES
 
@@ -77,6 +78,56 @@ def test_missing_guideline_fails_clearly(tmp_path: Path) -> None:
         load_prompt(tmp_path / "nope.md")
 
 
+def test_specific_cases_are_one_line_each_and_in_the_system_instruction() -> None:
+    cases = parse_specific_cases(GUIDELINE)
+    system = load_prompt().system
+
+    assert len(cases) == 6
+    for case in cases:
+        assert "\n" not in case
+        assert f"- {case}" in system
+    assert system.index("Specific cases") > system.index("Categories (choose exactly one)")
+
+
+@pytest.mark.parametrize(
+    "fragment",
+    [
+        "STL1011",
+        "deployment target",
+        "local Gradle, pub or CocoaPods cache",
+        "HTTP 404",
+        "binary size budget, coverage threshold",
+        "nothing failed to compile",
+    ],
+)
+def test_v2_rules_reach_the_model(fragment: str) -> None:
+    assert fragment in load_prompt().system
+
+
+def test_specific_cases_stop_at_the_next_section() -> None:
+    markdown = "\n".join(
+        [
+            "## Specific cases",
+            "Intro prose.",
+            "",
+            "- First case",
+            "  continued → `other`.",
+            "- Second case.",
+            "## Tie-break rules",
+            "- Not a case.",
+        ]
+    )
+
+    assert parse_specific_cases(markdown) == ["First case continued → `other`.", "Second case."]
+
+
+def test_guideline_without_specific_cases_fails_clearly() -> None:
+    without = GUIDELINE.replace("## Specific cases", "## Something else")
+
+    with pytest.raises(GuidelineError, match="Specific cases"):
+        build_prompt(without)
+
+
 # --- prompt version -----------------------------------------------------------------
 
 
@@ -92,6 +143,20 @@ def test_any_guideline_change_changes_both_hashes() -> None:
 
     assert edited.system == base.system
     assert edited.guideline_hash != base.guideline_hash
+    assert edited.version != base.version
+
+
+def test_v2_rules_changed_the_prompt_version() -> None:
+    # v1 (before the Specific cases section) was 010eb022ef97; its cached results must
+    # not be reused.
+    assert load_prompt().version != "010eb022ef97"
+
+
+def test_specific_case_change_changes_the_system_instruction() -> None:
+    base = build_prompt(GUIDELINE)
+    edited = build_prompt(GUIDELINE.replace("never `infra_flaky`", "never flaky"))
+
+    assert "never flaky" in edited.system
     assert edited.version != base.version
 
 

@@ -182,6 +182,24 @@ precisely in the root cause line.
 ERROR ITMS-90189: "Redundant Binary Upload. You've already uploaded a build with build number '42'."
 ```
 
+## Specific cases
+
+These cases come up often enough to settle once. Each one overrides the category
+definitions and the tie-break rules below. `cidoc analyze` and `cidoc eval` copy this
+list into the model's instructions, so keep each case to one bullet.
+
+- A compile error caused by a feature that a newer compiler or SDK removed or
+  deprecated, with no code change (e.g. MSVC `STL1011` for
+  `<experimental/coroutine>`) → `toolchain_version`, not `native_compile`.
+- An iOS/macOS deployment target or minimum OS version below what the installed Xcode
+  supports → `toolchain_version`.
+- Corrupted or missing files inside a local Gradle, pub or CocoaPods cache →
+  `infra_flaky`.
+- HTTP 404 means the resource does not exist → never `infra_flaky`.
+- A project-defined gate (binary size budget, coverage threshold) failed → `other`.
+- A runtime "symbol not found" or missing type caused by a dependency version
+  mismatch, where nothing failed to compile → `dependency_resolution`.
+
 ## Tie-break rules
 
 When more than one category seems to fit, apply the first rule that matches.
@@ -193,7 +211,8 @@ When more than one category seems to fit, apply the first rule that matches.
    - The secret exists but the workflow does not pass it to the step (missing `env:`
      or `with:` wiring) → `ci_config`.
 3. **Artifact or package download failed transiently:** HTTP 429 or 5xx, a timeout,
-   `Could not GET '...'`, `Could not parse POM` → `infra_flaky`.
+   `Could not GET '...'`, `Could not parse POM` → `infra_flaky`. A 404 is not
+   transient (see [Specific cases](#specific-cases)).
 4. **Version truly missing or constraints conflict** → `dependency_resolution`. So is
    a resolved dependency with a mismatched API (missing type or symbol) that is fixed
    by changing its version.
@@ -230,7 +249,8 @@ keep coming up they may become categories:
 - **`store_release`:** a store or registry upload rejected because the version or
   build already exists (App Store `ERROR ITMS-90189`, Play Console "Version code
   already used", pub.dev "version already exists").
-- **`quality_gate`:** a size, coverage or similar threshold check failed.
+- **`quality_gate`:** a size, coverage or similar threshold check failed (labeled
+  `other`, see [Specific cases](#specific-cases)).
 
 ## Confidence
 
