@@ -22,7 +22,7 @@ from cidoc.analyze.preprocess import PreprocessedLog, preprocess
 from cidoc.analyze.prompt import Prompt
 from cidoc.eval.baseline import Predictor
 from cidoc.eval.metrics import EvalItem
-from cidoc.labeling.labels import CATEGORIES, DEV_SPLIT, LABELS_FILENAME, Label, load_labels
+from cidoc.labeling.labels import DEV_SPLIT, LABELS_FILENAME, Label, load_labels, newest_labels
 from cidoc.llm.base import LLMProvider
 
 ALL_SPLITS = "all"
@@ -55,11 +55,7 @@ def load_cases(
     never written to labels.jsonl; a record whose category is not in the taxonomy is
     treated as skipped too.
     """
-    newest: dict[int, Label] = {}
-    for label in load_labels(data_dir / LABELS_FILENAME):
-        if label.category in CATEGORIES:
-            newest.pop(label.job_id, None)  # keep file order of the newest
-            newest[label.job_id] = label
+    newest = newest_labels(load_labels(data_dir / LABELS_FILENAME))
     labels = [lbl for lbl in newest.values() if split in (ALL_SPLITS, lbl.split)]
     if limit is not None:
         labels = labels[:limit]

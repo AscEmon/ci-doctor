@@ -1,16 +1,20 @@
 """Compare two eval runs: metric deltas and the items where they disagree.
 
-Runs are compared on the jobs both scored. When those are all of each run's jobs, each
-side keeps the metrics it saved; otherwise (a --limit run, a run stopped by --max-cost)
-both sides are recomputed on the shared jobs, so the numbers measure the same thing.
+Both runs are re-scored against one label set, the current labels.jsonl, not the labels
+each run file stored: otherwise a relabeled job could count as right in one run and
+wrong in the other for the same prediction. Jobs with no current label are left out.
+
+Runs are compared on the jobs both scored (a --limit run or one stopped by --max-cost
+scores fewer), and both sides' metrics are recomputed on those jobs.
 """
 
-from collections.abc import Callable
-from dataclasses import asdict, dataclass
+from collections.abc import Callable, Mapping
+from dataclasses import asdict, dataclass, replace
 from typing import Any
 
 from cidoc.eval.metrics import EvalItem, compute_metrics
 from cidoc.eval.results import RunFile
+from cidoc.labeling.labels import Label
 from cidoc.llm.pricing import Price
 
 # (key in the metrics dict, label, higher is better)
@@ -65,12 +69,21 @@ class Disagreement:
 
 
 @dataclass(frozen=True)
+class LabelChange:
+    job_id: int
+    old: str
+    """Label stored in the older run."""
+    new: str
+    """Label stored in the newer run."""
+
+
+@dataclass(frozen=True)
 class Comparison:
     shared: int
     only_a: list[int]
     only_b: list[int]
     recomputed: bool
-    """True when the runs scored different jobs and metrics were recomputed on shared ones."""
+    """True when the runs scored different jobs (metrics cover only the shared ones)."""
     deltas: list[MetricDelta]
     disagreements: list[Disagreement]
     """Shared jobs with different predictions: one side right first, then both wrong."""
@@ -79,23 +92,57 @@ class Comparison:
     only_b_right: int
     both_wrong: int
     notes: list[str]
+    label_changes: list[LabelChange]
+    """Shared jobs whose stored label differs between the runs (older run's → newer's)."""
+    unlabeled: list[int]
+    """Jobs either run scored that have no current label; left out of the comparison."""
 
 
 def _shared_metrics(items: list[EvalItem], shared: set[int], price: Price | None) -> dict[str, Any]:
     return asdict(compute_metrics([i for i in items if i.job_id in shared], price))
 
 
-def compare_runs(a: RunFile, b: RunFile, price_for: Callable[[str], Price | None]) -> Comparison:
+def relabel(item: EvalItem, label: Label) -> EvalItem:
+    """The item scored against `label` instead of the label its run stored."""
+    return replace(
+        item,
+        gold=label.category,
+        gold_confidence=label.confidence,
+        gold_evidence=list(label.evidence_lines),
+        gold_root_cause=label.root_cause,
+    )
+
+
+def _label_changes(
+    a: RunFile, b: RunFile, a_items: dict[int, EvalItem], b_items: dict[int, EvalItem]
+) -> list[LabelChange]:
+    a_is_older = a.info.created_at <= b.info.created_at
+    older, newer = (a_items, b_items) if a_is_older else (b_items, a_items)
+    return [
+        LabelChange(job_id, older[job_id].gold, newer[job_id].gold)
+        for job_id in sorted(set(older) & set(newer))
+        if older[job_id].gold != newer[job_id].gold
+    ]
+
+
+def compare_runs(
+    a: RunFile,
+    b: RunFile,
+    price_for: Callable[[str], Price | None],
+    labels: Mapping[int, Label],
+) -> Comparison:
+    """Compare A and B, scoring both against `labels` (job id -> current label)."""
     # Errored items were never scored, so they are not compared either.
-    a_items = {item.job_id: item for item in a.items if item.error is None}
-    b_items = {item.job_id: item for item in b.items if item.error is None}
+    a_stored = {item.job_id: item for item in a.items if item.error is None}
+    b_stored = {item.job_id: item for item in b.items if item.error is None}
+    label_changes = _label_changes(a, b, a_stored, b_stored)
+    unlabeled = sorted((set(a_stored) | set(b_stored)) - set(labels))
+    a_items = {j: relabel(i, labels[j]) for j, i in a_stored.items() if j in labels}
+    b_items = {j: relabel(i, labels[j]) for j, i in b_stored.items() if j in labels}
     shared = set(a_items) & set(b_items)
     recomputed = set(a_items) != set(b_items)
-    if recomputed:
-        a_metrics = _shared_metrics(a.items, shared, price_for(a.info.model))
-        b_metrics = _shared_metrics(b.items, shared, price_for(b.info.model))
-    else:
-        a_metrics, b_metrics = a.metrics, b.metrics
+    a_metrics = _shared_metrics(list(a_items.values()), shared, price_for(a.info.model))
+    b_metrics = _shared_metrics(list(b_items.values()), shared, price_for(b.info.model))
     deltas = [
         MetricDelta(key, label, a_metrics.get(key), b_metrics.get(key), higher)
         for key, label, higher in COMPARED_METRICS
@@ -122,10 +169,10 @@ def compare_runs(a: RunFile, b: RunFile, price_for: Callable[[str], Price | None
         notes.append(f"The runs scored different splits ({a.info.split} vs {b.info.split}).")
     if a.info.guideline_hash != b.info.guideline_hash:
         notes.append("The runs used different labeling guidelines (guideline hash differs).")
-    if any(a_items[j].gold != b_items[j].gold for j in shared):
+    if unlabeled:
         notes.append(
-            "Some labels changed between the runs; each side is scored against its own,"
-            " and disagreements show run A's label."
+            f"Left out {len(unlabeled)} jobs that have no label in labels.jsonl now:"
+            f" {', '.join(map(str, unlabeled))}"
         )
     for name, run in (("A", a), ("B", b)):
         if not run.info.complete:
@@ -139,5 +186,7 @@ def compare_runs(a: RunFile, b: RunFile, price_for: Callable[[str], Price | None
         deltas=deltas,
         disagreements=disagreements,
         notes=notes,
+        label_changes=label_changes,
+        unlabeled=unlabeled,
         **counts,
     )

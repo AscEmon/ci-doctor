@@ -47,6 +47,7 @@ from cidoc.labeling.labels import (
     LabelNotFoundError,
     find_label,
     load_labels,
+    newest_labels,
     replace_label_line,
 )
 from cidoc.labeling.session import (
@@ -223,7 +224,8 @@ def eval_command(
         except (OSError, ValueError, KeyError, TypeError) as exc:
             console.print(Text(f"cannot read run file: {exc}", style="red"))
             raise typer.Exit(2) from None
-        comparison = compare_runs(run_a, run_b, settings.price_for)
+        labels = newest_labels(load_labels(settings.data_dir / LABELS_FILENAME))
+        comparison = compare_runs(run_a, run_b, settings.price_for, labels)
         render_comparison(console, run_a, run_b, comparison)
         return
     try:

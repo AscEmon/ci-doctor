@@ -9,11 +9,13 @@ from typer.testing import CliRunner
 from cidoc.analyze.analyzer import AnalysisResult
 from cidoc.analyze.schema import Diagnosis
 from cidoc.cli import app
-from cidoc.eval.compare import compare_runs
+from cidoc.eval.compare import LabelChange, compare_runs
 from cidoc.eval.metrics import EvalItem, compute_metrics
 from cidoc.eval.results import RunFile, RunInfo, load_run, write_run
+from cidoc.labeling.labels import Label
 from cidoc.llm.base import Usage
 from cidoc.llm.pricing import Price
+from tests.datadir import add_label
 
 DEP, TEST, INFRA = "dependency_resolution", "test_failure", "infra_flaky"
 PRICE = Price(input=1.0, output=1.0)
@@ -62,6 +64,27 @@ B = run_file(
 )
 
 
+def labels(**categories: str) -> dict[int, Label]:
+    """Current labels, e.g. labels(j1=DEP, j2=TEST)."""
+    return {
+        int(key[1:]): Label(
+            job_id=int(key[1:]),
+            repo="o/a",
+            run_id=int(key[1:]),
+            category=category,
+            root_cause="cause",
+            evidence_lines=[1],
+            confidence=2,
+            log_path="x",
+            labeled_at="2026-11-24T00:00:00+00:00",
+        )
+        for key, category in categories.items()
+    }
+
+
+CURRENT = labels(j1=DEP, j2=TEST, j3=INFRA, j4=DEP)
+
+
 def prices(model: str) -> Price | None:
     return PRICE
 
@@ -71,7 +94,7 @@ def delta(comparison: Any, key: str) -> Any:
 
 
 def test_metric_deltas_and_direction() -> None:
-    comparison = compare_runs(A, B, prices)
+    comparison = compare_runs(A, B, prices, CURRENT)
 
     accuracy = delta(comparison, "accuracy")
     assert accuracy.a == pytest.approx(1 / 3)
@@ -87,7 +110,7 @@ def test_metric_deltas_and_direction() -> None:
 
 
 def test_disagreements_and_outcome_counts() -> None:
-    comparison = compare_runs(A, B, prices)
+    comparison = compare_runs(A, B, prices, CURRENT)
 
     assert [(d.job_id, d.a, d.b) for d in comparison.disagreements] == [
         (2, DEP, TEST),  # only B right: listed first
@@ -111,7 +134,7 @@ def test_different_item_sets_are_compared_on_shared_jobs() -> None:
         stopped="job 3: budget",
     )
 
-    comparison = compare_runs(A, partial_b, prices)
+    comparison = compare_runs(A, partial_b, prices, CURRENT)
 
     assert comparison.recomputed
     assert comparison.shared == 2
@@ -121,21 +144,69 @@ def test_different_item_sets_are_compared_on_shared_jobs() -> None:
     assert any("Run B is partial: job 3: budget" in note for note in comparison.notes)
 
 
-def test_notes_for_changed_guideline_and_labels() -> None:
-    relabeled = run_file(
-        "model-b",
-        [item(1, DEP, DEP), item(2, INFRA, DEP), item(3, INFRA, None)],
-        guideline_hash="g2",
-    )
+def test_note_for_changed_guideline() -> None:
+    other_guideline = run_file("model-b", B.items, guideline_hash="g2")
 
-    notes = compare_runs(A, relabeled, prices).notes
+    notes = compare_runs(A, other_guideline, prices, CURRENT).notes
 
     assert any("different labeling guidelines" in note for note in notes)
-    assert any("labels changed" in note for note in notes)
+
+
+# Job 2's label was test_failure when A ran, infra_flaky when B ran, and is
+# dependency_resolution now. Both models predicted the same thing on job 2.
+OLD_RUN = run_file(
+    "model-a",
+    [item(1, DEP, DEP), item(2, TEST, DEP), item(3, INFRA, INFRA)],
+    created_at="2026-11-20T08:00:00+00:00",
+)
+NEW_RUN = run_file(
+    "model-b",
+    [item(1, DEP, DEP), item(2, INFRA, DEP), item(3, INFRA, INFRA)],
+    created_at="2026-11-24T08:00:00+00:00",
+)
+RELABELED = labels(j1=DEP, j2=DEP, j3=INFRA)
+
+
+def test_both_runs_are_rescored_against_the_current_labels() -> None:
+    # Against their stored labels both got job 2 wrong; against the current one both are
+    # right, and identical predictions give identical metrics.
+    comparison = compare_runs(OLD_RUN, NEW_RUN, prices, RELABELED)
+
+    accuracy = delta(comparison, "accuracy")
+    assert (accuracy.a, accuracy.b) == (1.0, 1.0)
+    assert comparison.both_right == 3
+    assert comparison.disagreements == []
+
+
+def test_label_changes_between_runs_are_listed_old_to_new() -> None:
+    expected = [LabelChange(2, TEST, INFRA)]
+
+    assert compare_runs(OLD_RUN, NEW_RUN, prices, RELABELED).label_changes == expected
+    # Old → new follows the runs' timestamps, not the A/B order.
+    assert compare_runs(NEW_RUN, OLD_RUN, prices, RELABELED).label_changes == expected
+
+
+def test_disagreements_show_the_current_label() -> None:
+    b = run_file("model-b", [item(1, DEP, TEST), item(2, INFRA, TEST), item(3, INFRA, INFRA)])
+
+    comparison = compare_runs(OLD_RUN, b, prices, RELABELED)
+
+    assert [(d.job_id, d.gold, d.a_correct) for d in comparison.disagreements] == [
+        (1, DEP, True),
+        (2, DEP, True),
+    ]
+
+
+def test_jobs_no_longer_labeled_are_left_out() -> None:
+    comparison = compare_runs(A, B, prices, labels(j1=DEP, j2=TEST))
+
+    assert comparison.shared == 2
+    assert comparison.unlabeled == [3]
+    assert any("no label in labels.jsonl now: 3" in note for note in comparison.notes)
 
 
 def test_identical_runs_agree() -> None:
-    comparison = compare_runs(A, A, prices)
+    comparison = compare_runs(A, A, prices, CURRENT)
 
     assert comparison.disagreements == []
     assert all(d.delta in (0, None) for d in comparison.deltas)
@@ -149,7 +220,13 @@ def write(path: Path, run: RunFile) -> Path:
     return path
 
 
+def label_jobs(data_dir: Path) -> None:
+    for job_id, category in ((1, DEP), (2, TEST), (3, INFRA)):
+        add_label(data_dir, job_id, category)
+
+
 def test_compare_command(data_dir: Path, tmp_path: Path) -> None:
+    label_jobs(data_dir)
     a = write(tmp_path / "a.json", A)
     b = write(tmp_path / "b.json", B)
 
@@ -164,11 +241,29 @@ def test_compare_command(data_dir: Path, tmp_path: Path) -> None:
 
 
 def test_compare_needs_no_key_or_prompt(data_dir: Path, tmp_path: Path) -> None:
+    label_jobs(data_dir)
     a = write(tmp_path / "a.json", A)
 
     result = CliRunner().invoke(app, ["eval", "--compare", str(a), str(a)])
 
     assert result.exit_code == 0, result.output
+    assert "agree on every shared item" in result.output
+
+
+def test_compare_command_warns_about_changed_labels(data_dir: Path, tmp_path: Path) -> None:
+    add_label(data_dir, 1, DEP)
+    add_label(data_dir, 2, TEST)
+    add_label(data_dir, 2, DEP)  # relabeled after both runs
+    add_label(data_dir, 3, INFRA)
+    old = write(tmp_path / "old.json", OLD_RUN)
+    new = write(tmp_path / "new.json", NEW_RUN)
+
+    result = CliRunner().invoke(app, ["eval", "--compare", str(old), str(new)])
+
+    assert result.exit_code == 0, result.output
+    assert "current labels.jsonl" in result.output
+    assert "labels changed between the runs for 1 jobs" in result.output
+    assert "job 2: test_failure → infra_flaky" in result.output
     assert "agree on every shared item" in result.output
 
 
@@ -197,7 +292,7 @@ def test_errored_items_are_not_compared() -> None:
     errored = replace(item(2, TEST, None), error="ServerUnavailableError: 503")
     b_with_error = run_file("model-b", [item(1, DEP, DEP), errored, item(3, INFRA, TEST)])
 
-    comparison = compare_runs(A, b_with_error, prices)
+    comparison = compare_runs(A, b_with_error, prices, CURRENT)
 
     assert comparison.shared == 2
     assert comparison.recomputed

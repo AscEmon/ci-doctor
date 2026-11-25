@@ -200,6 +200,19 @@ def render_comparison(
             f" only in B: {len(comparison.only_b)})"
         )
     console.print(Text(scope, style="dim"))
+    console.print(Text("Both runs scored against the current labels.jsonl.", style="dim"))
+    if comparison.label_changes:
+        console.print(
+            Text(
+                f"Warning: labels changed between the runs for"
+                f" {len(comparison.label_changes)} jobs (older run → newer run):",
+                style="yellow",
+            )
+        )
+        for change in comparison.label_changes:
+            console.print(
+                Text(f"  job {change.job_id}: {change.old} → {change.new}", style="yellow")
+            )
     for note in comparison.notes:
         console.print(Text(note, style="yellow"))
 

@@ -104,6 +104,19 @@ def load_labels(path: Path, on_bad_line: Callable[[int], None] | None = None) ->
     return labels
 
 
+def newest_labels(labels: list[Label]) -> dict[int, Label]:
+    """The newest label per job, in file order of those newest labels.
+
+    Records whose category is not in the taxonomy (e.g. a skip) are ignored.
+    """
+    newest: dict[int, Label] = {}
+    for label in labels:
+        if label.category in CATEGORIES:
+            newest.pop(label.job_id, None)  # keep file order of the newest
+            newest[label.job_id] = label
+    return newest
+
+
 def append_label(path: Path, label: Label) -> None:
     """Append one label and fsync, so a crash right after never loses a finished label."""
     path.parent.mkdir(parents=True, exist_ok=True)
