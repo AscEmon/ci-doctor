@@ -1,3 +1,4 @@
+import re
 from pathlib import Path
 
 import pytest
@@ -8,8 +9,10 @@ from cidoc.analyze.prompt import (
     GuidelineError,
     build_prompt,
     defuse_tags,
+    guideline_section,
     load_prompt,
     parse_category_definitions,
+    parse_decision_table,
 )
 from cidoc.labeling.labels import CATEGORIES
 
@@ -59,11 +62,52 @@ def test_definitions_come_only_from_the_categories_section() -> None:
     }
 
 
-def test_system_instruction_contains_every_definition() -> None:
-    prompt = load_prompt()
+def section(title: str) -> str:
+    return guideline_section(GUIDELINE, re.compile(rf"^## \d+\. {title}"))
 
-    for name, definition in parse_category_definitions(GUIDELINE).items():
-        assert f"- {name}: {definition}" in prompt.system
+
+def test_system_instruction_has_sections_3_and_4_as_written() -> None:
+    system = load_prompt().system
+    decision, definitions = section("Decision procedure"), section("Category definitions")
+
+    assert f"<decision_procedure>\n{decision}\n</decision_procedure>" in system
+    assert f"<category_definitions>\n{definitions}\n</category_definitions>" in system
+    assert "| 1 | Did a **store or registry reject an upload or publish**?" in decision
+    assert decision.endswith("`toolchain_version` (rule 5), not `native_compile` (rule 10).")
+    assert definitions.startswith("### `store_release`")
+    assert "## 5." not in definitions  # stops at the next section
+
+
+def test_system_instruction_says_first_match_wins() -> None:
+    system = load_prompt().system
+
+    assert "in order, starting at 1" in system
+    assert "Stop at the first question whose answer is yes" in system
+    assert system.index("Stop at the first") < system.index("<decision_procedure>")
+    assert "first matching question wins" in load_prompt().user(preprocess(failing(), [], 6000))
+
+
+def test_decision_table_names_every_category_once_in_order() -> None:
+    rows = parse_decision_table(section("Decision procedure"))
+
+    assert [n for n, _ in rows] == list(range(1, len(CATEGORIES) + 1))
+    assert sorted(c for _, c in rows) == sorted(CATEGORIES)
+    assert rows[0] == (1, "store_release")
+    assert rows[-1] == (len(CATEGORIES), "other")
+
+
+@pytest.mark.parametrize(
+    ("old", "new", "error"),
+    [
+        ("| `ci_config` |", "| `ci_stuff` |", r"missing \['ci_config'\], unknown \['ci_stuff'\]"),
+        ("| `ci_config` |", "| `infra_flaky` |", r"repeated \['infra_flaky'\]"),
+        ("| 7 | Is the **workflow", "| 70 | Is the **workflow", "numbered 1..N"),
+        ("## 3. Decision procedure", "## 3. How to choose", "no .* Decision procedure"),
+    ],
+)
+def test_broken_decision_table_fails_clearly(old: str, new: str, error: str) -> None:
+    with pytest.raises(GuidelineError, match=error):
+        build_prompt(GUIDELINE.replace(old, new))
 
 
 def test_guideline_must_match_the_taxonomy() -> None:
@@ -86,7 +130,7 @@ def test_missing_guideline_fails_clearly(tmp_path: Path) -> None:
         "local Gradle, pub, or CocoaPods **cache**",
         "HTTP **404**",
         "binary size budget, coverage threshold",
-        "missing type, method, or native symbol",
+        "missing type, method, or native",
         "Version code N has already been used",
     ],
 )
@@ -95,6 +139,18 @@ def test_v3_definitions_reach_the_model(fragment: str) -> None:
 
 
 # --- prompt version -----------------------------------------------------------------
+
+
+def test_v3_changed_the_prompt_version() -> None:
+    # 3dc23830cf06 was the v3 definitions flattened, without the decision procedure.
+    assert load_prompt().version not in ("010eb022ef97", "af5575ce1550", "3dc23830cf06")
+
+
+def test_decision_table_change_changes_the_system_instruction() -> None:
+    edited = build_prompt(GUIDELINE.replace('Stop at the first "yes".', "Stop at a yes."))
+
+    assert "Stop at a yes." in edited.system
+    assert edited.version != load_prompt().version
 
 
 def test_prompt_version_is_stable() -> None:
