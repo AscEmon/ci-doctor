@@ -13,6 +13,8 @@ Everything a tool returns is redacted with the miner's secret rules and capped a
 
 import base64
 import binascii
+import contextlib
+import hashlib
 import importlib
 import re
 import time
@@ -22,8 +24,9 @@ from typing import Any, Literal, Protocol
 from urllib.parse import quote
 
 import httpx
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
+from cidoc.agent.cache import ToolCache, tool_cache_key
 from cidoc.agent.context import RunContext, valid_repo, valid_sha
 from cidoc.analyze.preprocess import CHARS_PER_TOKEN, MAX_LINE_CHARS
 from cidoc.github_client import RetryableHTTPError
@@ -194,6 +197,15 @@ class ReadFileArgs(BaseModel):
     start_line: int = Field(1, ge=1)
     end_line: int = Field(READ_FILE_MAX_LINES, ge=1)
 
+    @field_validator("path")
+    @classmethod
+    def _repo_path(cls, value: str) -> str:
+        # Normalized here, so "./a" and "a" are one call (and one cache entry).
+        try:
+            return validate_repo_path(value)
+        except ToolError as exc:
+            raise ValueError(str(exc)) from None
+
 
 def read_file(env: ToolEnv, args: ReadFileArgs) -> str:
     github, repo, sha = _require_run(env)
@@ -247,6 +259,14 @@ class ListDirArgs(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     path: str = "."
+
+    @field_validator("path")
+    @classmethod
+    def _repo_path(cls, value: str) -> str:
+        try:
+            return validate_repo_path(value, allow_root=True) or "."
+        except ToolError as exc:
+            raise ValueError(str(exc)) from None
 
 
 def list_dir(env: ToolEnv, args: ListDirArgs) -> str:
@@ -852,31 +872,51 @@ def select_tools(names: Sequence[str] | None) -> list[ToolSpec]:
 
 
 class ToolBox:
-    """The tools enabled for one job. `call` never raises."""
+    """The tools enabled for one job. `call` never raises.
+
+    With a `cache`, a successful result is stored and every later identical call (same
+    job context, tool and normalized arguments) is answered from disk.
+    """
 
     def __init__(
         self,
         env: ToolEnv,
         names: Sequence[str] | None = None,
         cap_tokens: int = OUTPUT_CAP_TOKENS,
+        cache: ToolCache | None = None,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self.env = env
         self.specs = select_tools(names)
         self.cap_tokens = cap_tokens
+        self.cache = cache
         self._clock = clock
         self._by_name = {spec.name: spec for spec in self.specs}
+        self._log_digest: str | None = None
 
     @property
     def names(self) -> list[str]:
         return [spec.name for spec in self.specs]
+
+    def _ref(self, scope: Scope) -> str:
+        """What a result in `scope` is pinned to (see agent.cache)."""
+        ctx = self.env.ctx
+        if scope == "commit":
+            return f"commit:{ctx.head_sha}"
+        if scope == "run":
+            return f"run:{ctx.run_id}"
+        if self._log_digest is None:
+            joined = "\n".join(ctx.log_lines).encode("utf-8")
+            self._log_digest = hashlib.sha256(joined).hexdigest()[:16]
+        return f"job:{ctx.job_id}:{self._log_digest}"
 
     def call(self, name: str, raw_args: dict[str, Any] | None) -> ToolOutput:
         start = self._clock()
         raw = dict(raw_args or {})
 
         def done(text: str, ok: bool, args: dict[str, Any], cached: bool = False) -> ToolOutput:
-            return ToolOutput(name, args, self._finish(text), ok, self._clock() - start, cached)
+            text = cap_output(text, self.cap_tokens)
+            return ToolOutput(name, args, text, ok, self._clock() - start, cached)
 
         spec = self._by_name.get(name)
         if spec is None:
@@ -886,11 +926,18 @@ class ToolBox:
         except ValidationError as exc:
             return done(f"{ERROR_PREFIX}invalid arguments: {_validation_message(exc)}", False, raw)
         normalized = args.model_dump()
+        repo, ref = self.env.ctx.repo or "", self._ref(spec.scope)
+        key = tool_cache_key(repo, ref, name, normalized)
+        if self.cache is not None:
+            hit = self.cache.get(key)
+            if hit is not None:
+                return done(hit, True, normalized, cached=True)
         try:
-            text = spec.run(self.env, args)
+            text = redact(spec.run(self.env, args)).text
         except Exception as exc:  # a tool must never break the agent loop
-            return done(ERROR_PREFIX + describe_error(exc), False, normalized)
+            return done(redact(ERROR_PREFIX + describe_error(exc)).text, False, normalized)
+        if self.cache is not None:
+            meta = {"repo": repo, "ref": ref, "tool": name, "args": normalized}
+            with contextlib.suppress(OSError):  # an unwritable cache only costs a refetch
+                self.cache.put(key, text, meta)
         return done(text, True, normalized)
-
-    def _finish(self, text: str) -> str:
-        return cap_output(redact(text).text, self.cap_tokens)
