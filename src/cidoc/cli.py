@@ -211,7 +211,9 @@ def eval_command(
     tools: Annotated[
         str | None,
         typer.Option(
-            "--tools", metavar="a,b,...", help="With --agent: only these tools (default all)."
+            "--tools",
+            metavar="a,b,...",
+            help="With --agent: only these tools, or none (default all).",
         ),
     ] = None,
 ) -> None:
@@ -331,7 +333,7 @@ def eval_command(
             plan.calls,
             price,
             max_cost,
-            max_steps=setup.limits.max_steps if setup else None,
+            max_steps=(setup.limits.max_steps if setup.tools else 0) if setup else None,
         )
         return
 
@@ -481,7 +483,7 @@ def analyze(
         typer.Option(
             "--tools",
             metavar="a,b,...",
-            help=f"With --agent: only these tools (default all: {','.join(TOOLS)}).",
+            help=f"With --agent: only these tools, or none (default all: {','.join(TOOLS)}).",
         ),
     ] = None,
 ) -> None:
@@ -577,7 +579,7 @@ def analyze_agent(
         Text(
             f"{source.source}: {log.total_lines} lines, ~{log.estimated_tokens} tokens of"
             f" excerpt (agent prompt {setup.prompt.version}, model {name},"
-            f" tools {','.join(setup.tools)}, max {setup.limits.max_steps} steps)",
+            f" tools {','.join(setup.tools) or 'none'}, max {setup.limits.max_steps} steps)",
             style="dim",
         )
     )

@@ -80,7 +80,7 @@ def render_summary(console: Console, info: RunInfo, metrics: Metrics) -> None:
     ]
     if info.agent:
         rows += [
-            ("agent tools", ", ".join(info.tools or []) or "—"),
+            ("agent tools", ", ".join(info.tools or []) or "none"),
             ("max steps", str(info.max_steps)),
             ("tool calls / item", number(metrics.mean_tool_calls)),
             ("items that used a tool", f"{pct(metrics.used_tools_rate)} of {metrics.agent_items}"),
@@ -173,7 +173,12 @@ def render_estimate(
         "No API calls were made.",
         "Estimates use 4 characters per token; validation retries are not included.",
     ]
-    if max_steps is not None:
+    if max_steps == 0:
+        notes.append(
+            "Agent with no tools: one model call per uncached item (a text re-prompt or"
+            " validation retry, if needed, is not counted)."
+        )
+    elif max_steps is not None:
         notes.append(
             f"Agent: each uncached item is counted at its worst case: up to {max_steps}"
             f" tool rounds and the final submit (at most {max_steps + 1} model calls), each"
@@ -235,7 +240,8 @@ def _run_label(run: RunFile) -> str:
     version = run.info.prompt_version or "no prompt"
     model = run.info.model
     if run.info.agent:
-        model += f" agent (max {run.info.max_steps} steps, tools {','.join(run.info.tools or [])})"
+        tools = ",".join(run.info.tools or []) or "none"
+        model += f" agent (max {run.info.max_steps} steps, tools {tools})"
     return f"{model} ({version}, {run.info.split} split, {run.info.created_at[:16]})"
 
 

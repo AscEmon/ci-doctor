@@ -30,13 +30,22 @@ TOOLS_MAX_ATTEMPTS = 1
 the model as a short error text instead of sleeping until the quota resets."""
 
 
+NO_TOOLS = "none"
+"""`--tools none`: the agent loop and instruction with only submit_diagnosis offered."""
+
+
 def parse_tool_names(value: str | None) -> list[str] | None:
-    """`--tools a,b` as a list (validated); None (every tool) when not given."""
+    """`--tools a,b` as a list (validated); [] for "none"; None (every tool) when not
+    given."""
     if value is None:
         return None
     names = [name.strip() for name in value.split(",") if name.strip()]
     if not names:
-        raise UnknownToolError("--tools needs at least one tool name")
+        raise UnknownToolError(f"--tools needs at least one tool name, or {NO_TOOLS}")
+    if NO_TOOLS in names:
+        if len(names) > 1:
+            raise UnknownToolError(f"--tools {NO_TOOLS} cannot be combined with tool names")
+        return []
     select_tools(names)  # raises UnknownToolError
     return names
 

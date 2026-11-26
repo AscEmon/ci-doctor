@@ -38,7 +38,8 @@ def estimate_item_calls(
     )
     calls: list[CallEstimate] = []
     spent = 0
-    for k in range(limits.max_steps + 1):
+    rounds = limits.max_steps if prompt.tools else 0  # --tools none: one call
+    for k in range(rounds + 1):
         size = first + (limits.cap_tokens + (k - 1) * COMPACT_RESULT_TOKENS if k else 0)
         if calls and spent + size > limits.max_input_tokens:
             break

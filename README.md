@@ -60,7 +60,9 @@ and `commit_changes`. It prints each tool call (arguments, a short preview of th
 output) and the final diagnosis, including the repository files it relied on.
 
 - `--max-steps N` caps tool calls (default 6); after that the model must answer.
-- `--tools a,b,...` offers only those tools (for ablations); default all.
+- `--tools a,b,...` offers only those tools (for ablations); default all. `--tools none`
+  runs the same agent instruction and loop with only `submit_diagnosis`: the checklist
+  reasoning stays, the tool references go, and it gets its own prompt version.
 - `--no-call` prints the system instruction, the excerpt and the tool list, no API call.
 - `CIDOC_AGENT_MAX_INPUT` caps the input tokens of all model calls of one item (default
   80,000). Tool results the model has already answered are resent compacted (first 300
