@@ -43,7 +43,7 @@ def test_agent_prints_the_trajectory_and_the_diagnosis(
     assert "agent trajectory" in result.output
     assert "search_log" in result.output
     assert 'pattern="Undefined name"' in result.output
-    assert "1 lines match" in result.output  # output preview
+    assert "1 matching lines (1 distinct)" in result.output  # output preview
     assert "1 tool call (max 6); 2 model calls" in result.output
     assert "dart_compile" in result.output
     assert "lib/main.dart:3" in result.output

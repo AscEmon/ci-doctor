@@ -294,7 +294,11 @@ class LogSteps:
 
 def locate_failed_steps(text: str, failed_steps: Iterable[str]) -> LogSteps:
     """Steps that contain an ##[error] or match a failed step name from the API."""
-    lines = clean_log(text)
+    return locate_failed_steps_in_lines(clean_log(text), failed_steps)
+
+
+def locate_failed_steps_in_lines(lines: list[str], failed_steps: Iterable[str]) -> LogSteps:
+    """locate_failed_steps for lines already cleaned with clean_log."""
     end = next((i for i, line in enumerate(lines) if line.startswith(CLEANUP_LINE)), len(lines))
     hidden = hidden_action_lines(lines, end)
     noise = fastlane_noise_blocks(lines, end)

@@ -18,7 +18,7 @@ import hashlib
 import importlib
 import re
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from typing import Any, Literal, Protocol
 from urllib.parse import quote
@@ -30,7 +30,7 @@ from cidoc.agent.cache import ToolCache, tool_cache_key
 from cidoc.agent.context import RunContext, valid_repo, valid_sha
 from cidoc.analyze.preprocess import CHARS_PER_TOKEN, MAX_LINE_CHARS
 from cidoc.github_client import RetryableHTTPError
-from cidoc.logview import split_lines
+from cidoc.logview import locate_failed_steps_in_lines, split_lines
 from cidoc.miner.runs import failed_step_names, runner_os_from_labels
 from cidoc.redact import redact
 
@@ -449,31 +449,67 @@ def compile_search_pattern(pattern: str, ignore_case: bool) -> re.Pattern[str]:
 @dataclass(frozen=True)
 class SearchResult:
     matches: list[int]
-    """1-based numbers of the matching lines shown (at most max_matches)."""
-    total: int
-    """Matching lines found (including those not shown)."""
+    """0-based indices of every matching line scanned, in log order."""
     stopped_at: int | None = None
-    """The line the scan stopped before, when it ran out of time."""
+    """The 0-based index the scan stopped before, when it ran out of time."""
 
 
 def search_lines(
     lines: Sequence[str],
     regex: re.Pattern[str],
-    max_matches: int,
+    candidates: Iterable[int] | None = None,
     deadline_s: float = SEARCH_DEADLINE_S,
     clock: Callable[[], float] = time.monotonic,
 ) -> SearchResult:
+    """Indices of `candidates` (default: every line) whose first MAX_LINE_CHARS
+    characters match `regex`; stops at `deadline_s`, checked between lines."""
     start = clock()
     matches: list[int] = []
-    total = 0
-    for number, line in enumerate(lines, start=1):
+    for i in candidates if candidates is not None else range(len(lines)):
         if clock() - start > deadline_s:
-            return SearchResult(matches, total, stopped_at=number)
-        if regex.search(line[:MAX_LINE_CHARS]):
-            total += 1
-            if len(matches) < max_matches:
-                matches.append(number)
-    return SearchResult(matches, total)
+            return SearchResult(matches, stopped_at=i)
+        if regex.search(lines[i][:MAX_LINE_CHARS]):
+            matches.append(i)
+    return SearchResult(matches)
+
+
+# Lines that match common patterns ("fail", "error") without saying anything about the
+# failure. GitHub prints a header block for each step: "##[group]Run <command>", the
+# command, "shell: ... -o pipefail {0}", "env:" with indented "  NAME: value" lines, then
+# "##[endgroup]". shell:/env:/assignments count as noise only inside that block, so
+# test output such as "  Actual: <4>" is never dropped.
+_GROUP_RUN = "##[group]Run"
+_ENDGROUP = "##[endgroup]"
+_COMMAND = "[command]"
+_HEADER_NOISE = ("shell:", "env:")
+_ENV_ASSIGNMENT = re.compile(r"^\s+[A-Za-z_][A-Za-z0-9_]*: ")
+
+
+def search_noise(lines: Sequence[str]) -> set[int]:
+    """0-based indices of lines search_log never returns."""
+    noise: set[int] = set()
+    in_header = in_env = False
+    for i, line in enumerate(lines):
+        stripped = line.lstrip()
+        if stripped.startswith(_GROUP_RUN):
+            noise.add(i)
+            in_header, in_env = True, False
+        elif stripped.startswith(_ENDGROUP):
+            noise.add(i)
+            in_header = in_env = False
+        elif stripped.startswith(_COMMAND):
+            noise.add(i)
+        elif in_header and stripped.startswith(_HEADER_NOISE):
+            noise.add(i)
+            in_env = stripped.startswith("env:")
+        elif in_env and _ENV_ASSIGNMENT.match(line):
+            noise.add(i)
+        else:
+            in_env = False
+    return noise
+
+
+SearchScope = Literal["failed_step", "all"]
 
 
 class SearchLogArgs(BaseModel):
@@ -482,24 +518,79 @@ class SearchLogArgs(BaseModel):
     pattern: str
     max_matches: int = Field(SEARCH_DEFAULT_MATCHES, ge=1, le=SEARCH_MAX_MATCHES)
     ignore_case: bool = True
+    scope: SearchScope = "failed_step"
+
+
+@dataclass(frozen=True)
+class Hit:
+    index: int
+    """0-based index of the first occurrence."""
+    text: str
+    count: int
+    distance: int | None
+    """Lines to the nearest ##[error]; None when the log has none."""
+
+
+def rank_hits(lines: Sequence[str], matches: Iterable[int], errors: Sequence[int]) -> list[Hit]:
+    """Identical lines merged (first occurrence, with a count), closest to an ##[error]
+    first, then in log order."""
+    first: dict[str, int] = {}
+    counts: dict[str, int] = {}
+    for i in matches:
+        text = lines[i].strip()
+        first.setdefault(text, i)
+        counts[text] = counts.get(text, 0) + 1
+
+    def distance(i: int) -> int | None:
+        return min((abs(i - e) for e in errors), default=None)
+
+    hits = [Hit(i, text, counts[text], distance(i)) for text, i in first.items()]
+    hits.sort(key=lambda h: (h.distance is None, h.distance or 0, h.index))
+    return hits
 
 
 def search_log(env: ToolEnv, args: SearchLogArgs) -> str:
     regex = compile_search_pattern(args.pattern, args.ignore_case)
     lines = env.ctx.log_lines
-    found = search_lines(lines, regex, args.max_matches)
-    shown = len(found.matches)
-    if found.total == 0:
-        header = f"no lines match /{args.pattern}/ in {len(lines)} log lines"
-    elif shown < found.total:
-        header = f"first {shown} of {found.total} lines matching /{args.pattern}/"
+    located = locate_failed_steps_in_lines(lines, env.ctx.failed_steps)
+    scope_note = ""
+    if args.scope == "failed_step" and located.failed:
+        candidates = sorted(
+            {
+                i
+                for step in located.failed
+                for i in range(step.start, step.stop)
+                if i not in located.hidden
+            }
+        )
+        titles = "; ".join(step.title for step in located.failed)
+        scope_note = f"in the failed step ({titles})"
     else:
-        header = f"{found.total} lines match /{args.pattern}/"
-    rows = [f"L{n}| {_clip_line(lines[n - 1])}" for n in found.matches]
+        candidates = list(range(located.end))  # nothing after "Post job cleanup."
+        scope_note = "in the whole log"
+        if args.scope == "failed_step":
+            scope_note += " (no failed step found)"
+    noise = search_noise(lines)
+    candidates = [i for i in candidates if i not in noise]
+    found = search_lines(lines, regex, candidates)
+    hits = rank_hits(lines, found.matches, located.errors)
+    shown = hits[: args.max_matches]
+    total = len(found.matches)
+    if not hits:
+        header = f"no lines match /{args.pattern}/ {scope_note}"
+    else:
+        header = (
+            f"{total} matching lines ({len(hits)} distinct) for /{args.pattern}/ {scope_note};"
+            f" showing {len(shown)} of {len(hits)}, closest to an ##[error] first"
+        )
+    rows = []
+    for hit in shown:
+        repeat = f" (x{hit.count})" if hit.count > 1 else ""
+        rows.append(f"L{hit.index + 1}| {_clip_line(lines[hit.index])}{repeat}")
     footer = []
     if found.stopped_at is not None:
         footer.append(
-            f"(search stopped after {SEARCH_DEADLINE_S:g}s before line {found.stopped_at}"
+            f"(search stopped after {SEARCH_DEADLINE_S:g}s before line {found.stopped_at + 1}"
             f" of {len(lines)}; use a narrower pattern)"
         )
     return "\n".join([header, *rows, *footer])
@@ -510,9 +601,16 @@ _register(
         name="search_log",
         description=(
             "Search the FULL job log (not just the excerpt) with a Python regular expression;"
-            ' returns matching lines as "L<n>| <line>", numbered like the excerpt.'
-            " Case-insensitive unless ignore_case is false. Backreferences, nested repeats"
-            " and more than two unbounded repeats are refused."
+            ' returns matching lines as "L<n>| <line>", numbered like the excerpt, identical'
+            " lines merged with a count, closest to an ##[error] first. scope"
+            ' "failed_step" (default) searches the failed step only, "all" the whole job.'
+            " Step headers, shell:/env: lines and [command] lines never match."
+            " Case-insensitive unless ignore_case is false. Good patterns:"
+            ' "Expected:|Actual:" (test assertions), "Exception|Error:" (exceptions),'
+            r' "\[E\]|Some tests failed" (failed tests), "Could not|timed out|429|ECONNRESET"'
+            ' (network and infrastructure). Beware: "fail" also matches "pipefail"; use'
+            r" word boundaries: \bfail\b. Backreferences, nested repeats and more than two"
+            " unbounded repeats are refused."
         ),
         parameters={
             "type": "object",
@@ -520,9 +618,14 @@ _register(
                 "pattern": {"type": "string", "description": "A Python regex."},
                 "max_matches": {
                     "type": "integer",
-                    "description": f"Lines to return (1-{SEARCH_MAX_MATCHES}).",
+                    "description": f"Distinct lines to return (1-{SEARCH_MAX_MATCHES}).",
                 },
                 "ignore_case": {"type": "boolean"},
+                "scope": {
+                    "type": "string",
+                    "enum": ["failed_step", "all"],
+                    "description": 'Where to search; default "failed_step".',
+                },
             },
             "required": ["pattern"],
         },

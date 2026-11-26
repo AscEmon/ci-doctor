@@ -5,6 +5,7 @@ would leak the answer. It is never selected from the database, so no tool can re
 and no prompt can contain it.
 """
 
+import json
 import re
 import sqlite3
 from dataclasses import dataclass, field
@@ -12,7 +13,7 @@ from dataclasses import dataclass, field
 from cidoc.logview import clean_log
 
 # Never add fix_sha here.
-_COLUMNS = "repo, run_id, head_sha, head_branch, workflow_path"
+_COLUMNS = "repo, run_id, head_sha, head_branch, workflow_path, failed_steps"
 _REPO = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 _SHA = re.compile(r"^[0-9a-f]{7,40}$")
 
@@ -26,6 +27,8 @@ class RunContext:
     """The failing commit. Every repository read happens at this commit."""
     head_branch: str | None = None
     workflow_path: str | None = None
+    failed_steps: list[str] = field(default_factory=list)
+    """Failed step names from the API, to find the failed step blocks in the log."""
     log_lines: list[str] = field(default_factory=list)
     """The full stored log, cleaned (timestamps and ANSI codes removed). Line N here is
     "L<N>|" in the excerpt, so numbers from the log tools match the excerpt."""
@@ -60,5 +63,6 @@ def load_context(conn: sqlite3.Connection, job_id: int, log_text: str) -> RunCon
         head_sha=row["head_sha"],
         head_branch=row["head_branch"],
         workflow_path=row["workflow_path"],
+        failed_steps=list(json.loads(row["failed_steps"] or "[]")),
         log_lines=lines,
     )
