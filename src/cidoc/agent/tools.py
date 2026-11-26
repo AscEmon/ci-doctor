@@ -28,6 +28,7 @@ from cidoc.agent.context import RunContext, valid_repo, valid_sha
 from cidoc.analyze.preprocess import CHARS_PER_TOKEN, MAX_LINE_CHARS
 from cidoc.github_client import RetryableHTTPError
 from cidoc.logview import split_lines
+from cidoc.miner.runs import failed_step_names, runner_os_from_labels
 from cidoc.redact import redact
 
 OUTPUT_CAP_TOKENS = 2000
@@ -555,6 +556,223 @@ _register(
         scope="job",
         run=read_log,
         needs_github=False,
+    )
+)
+
+
+# --- run-context tools ------------------------------------------------------------------
+
+JOBS_PAGE_SIZE = 100
+PREVIOUS_RUNS_PAGE_SIZE = 30
+COMMIT_MAX_FILES = 100
+PATCH_MAX_LINES = 200
+# "Flutter 3.24.0", "java: 17", "xcode_15.4", "jdk-21", "dart 3.5"
+_VERSION_IN_NAME = re.compile(
+    r"\b(flutter|dart|java|jdk|xcode|ndk|gradle|kotlin|node)[\s:=_-]*v?(\d+(?:\.\d+)*)",
+    re.IGNORECASE,
+)
+_MATRIX_IN_NAME = re.compile(r"\(([^()]*)\)\s*$")
+
+
+def _run_id(env: ToolEnv) -> int:
+    if env.ctx.run_id is None:
+        raise ToolError("no run metadata for this job (not in the database); use the log tools")
+    return env.ctx.run_id
+
+
+def versions_in_name(name: str) -> list[str]:
+    """Toolchain versions visible in a job name: "flutter 3.24.0", and the matrix values
+    GitHub appends in parentheses ("build (macos-14, 3.24.0)")."""
+    found = [f"{tool.lower()} {version}" for tool, version in _VERSION_IN_NAME.findall(name)]
+    matrix = _MATRIX_IN_NAME.search(name)
+    if matrix and matrix.group(1).strip():
+        found.append(f"matrix ({matrix.group(1).strip()})")
+    return found
+
+
+def _job_line(job: dict[str, Any]) -> str:
+    name = str(job.get("name", "?"))
+    parts = [name, str(job.get("conclusion") or job.get("status") or "?")]
+    parts.append(runner_os_from_labels(job.get("labels") or []) or "unknown OS")
+    failed = failed_step_names(job)
+    if failed:
+        parts.append("failed steps: " + "; ".join(failed))
+    versions = versions_in_name(name)
+    if versions:
+        parts.append("versions: " + ", ".join(versions))
+    return " | ".join(parts)
+
+
+def sibling_jobs(env: ToolEnv, args: NoArgs) -> str:
+    github, repo, _ = _require_run(env)
+    run_id = _run_id(env)
+    data = github.get_json(
+        f"/repos/{repo}/actions/runs/{run_id}/jobs",
+        {"filter": "latest", "per_page": JOBS_PAGE_SIZE},
+    )
+    jobs = [j for j in (data.get("jobs") or []) if isinstance(j, dict)]
+    this = [j for j in jobs if j.get("id") == env.ctx.job_id]
+    others = [j for j in jobs if j.get("id") != env.ctx.job_id]
+    counts: dict[str, int] = {}
+    for job in others:
+        key = str(job.get("conclusion") or job.get("status") or "?")
+        counts[key] = counts.get(key, 0) + 1
+    summary = ", ".join(f"{n} {c}" for c, n in sorted(counts.items())) or "none"
+    rows = [f"this job: {_job_line(this[0])}" if this else "this job: (not listed)"]
+    rows.append(f"{len(others)} other jobs in this run ({summary}):")
+    rows.extend(f"- {_job_line(job)}" for job in others)
+    total = data.get("total_count")
+    if isinstance(total, int) and total > len(jobs):
+        rows.append(f"... ({total - len(jobs)} more jobs not listed)")
+    return "\n".join(rows)
+
+
+_register(
+    ToolSpec(
+        name="sibling_jobs",
+        description=(
+            "The other jobs of the same workflow run: name, conclusion, runner OS, failed"
+            " step names, and Flutter/Java/Xcode versions or matrix values visible in the"
+            " job name. No logs. Use it to see if the failure happens on only one OS,"
+            " channel or version."
+        ),
+        parameters={"type": "object", "properties": {}},
+        args_model=NoArgs,
+        scope="run",
+        run=sibling_jobs,
+    )
+)
+
+
+def previous_run(env: ToolEnv, args: NoArgs) -> str:
+    github, repo, sha = _require_run(env)
+    run_id = _run_id(env)
+    branch = env.ctx.head_branch
+    if not branch:
+        raise ToolError("the branch of this run is unknown")
+    run = github.get_json(f"/repos/{repo}/actions/runs/{run_id}")
+    workflow_id, created = run.get("workflow_id"), run.get("created_at")
+    if not isinstance(workflow_id, int) or not isinstance(created, str):
+        raise ToolError("cannot tell which workflow this run belongs to")
+    data = github.get_json(
+        f"/repos/{repo}/actions/workflows/{workflow_id}/runs",
+        {
+            "branch": branch,
+            "status": "completed",
+            "created": f"<{created}",
+            "per_page": PREVIOUS_RUNS_PAGE_SIZE,
+        },
+    )
+    # Filter here too: only runs created strictly before this one, never this run, so a
+    # later run (one that may contain the fix) can never be returned.
+    earlier = [
+        r
+        for r in (data.get("workflow_runs") or [])
+        if isinstance(r, dict)
+        and r.get("id") != run_id
+        and isinstance(r.get("created_at"), str)
+        and r["created_at"] < created
+    ]
+    if not earlier:
+        return f"no earlier completed run of this workflow on branch {branch}"
+    latest = max(earlier, key=lambda r: str(r["created_at"]))
+    other_sha = str(latest.get("head_sha", ""))
+    same = "same commit as the failing run" if other_sha == sha else "a different commit"
+    return "\n".join(
+        [
+            f"latest earlier run of this workflow on branch {branch}:",
+            f"conclusion: {latest.get('conclusion')}",
+            f"head_sha: {other_sha[:12]} ({same})",
+            f"created_at: {latest['created_at']} (failing run: {created})",
+            f"event: {latest.get('event', '?')}",
+        ]
+    )
+
+
+_register(
+    ToolSpec(
+        name="previous_run",
+        description=(
+            "The latest earlier completed run of the same workflow on the same branch:"
+            ' conclusion, head_sha, created_at. Answers "was it passing before?"; with'
+            " commit_changes it tells a code change from an environment change."
+        ),
+        parameters={"type": "object", "properties": {}},
+        args_model=NoArgs,
+        scope="run",
+        run=previous_run,
+    )
+)
+
+
+def _patch_excerpt(files: list[dict[str, Any]], max_lines: int) -> list[str]:
+    out: list[str] = []
+    remaining = sum(len(str(f.get("patch") or "").splitlines()) for f in files)
+    for f in files:
+        patch = str(f.get("patch") or "").splitlines()
+        if not patch:
+            continue
+        if len(out) >= max_lines:
+            break
+        out.append(f"--- {f.get('filename', '?')}")
+        room = max_lines - len(out)
+        out.extend(_clip_line(line) for line in patch[:room])
+        remaining -= min(len(patch), room)
+    if remaining > 0:
+        out.append(f"... (patch truncated: {remaining} more lines)")
+    return out
+
+
+def commit_changes(env: ToolEnv, args: NoArgs) -> str:
+    github, repo, sha = _require_run(env)
+    commit = github.get_json(f"/repos/{repo}/commits/{sha}")
+    parents = [p.get("sha") for p in commit.get("parents") or [] if isinstance(p, dict)]
+    message = str((commit.get("commit") or {}).get("message", "")).strip()
+    title = message.splitlines()[0] if message else "(no message)"
+    if len(parents) > 1:
+        # A merge: diff against the first parent explicitly. It is an ancestor of sha, so
+        # the three-dot merge base is the parent itself.
+        first = str(parents[0])
+        if not valid_sha(first):
+            raise ToolError("the first parent of this merge commit looks malformed")
+        files = github.get_json(f"/repos/{repo}/compare/{first}...{sha}").get("files") or []
+        kind = f"merge commit; changes vs its first parent {first[:12]}"
+    else:
+        files = commit.get("files") or []
+        kind = "changes vs its parent" if parents else "root commit"
+    files = [f for f in files if isinstance(f, dict)]
+    additions = sum(int(f.get("additions") or 0) for f in files)
+    deletions = sum(int(f.get("deletions") or 0) for f in files)
+    rows = [
+        f"commit {sha[:12]}: {_clip_line(title)}",
+        f"{kind}: {len(files)} files, +{additions} -{deletions}",
+    ]
+    for f in files[:COMMIT_MAX_FILES]:
+        rows.append(
+            f"{f.get('status', '?'):<9} {f.get('filename', '?')}"
+            f" (+{f.get('additions', 0)} -{f.get('deletions', 0)})"
+        )
+    if len(files) > COMMIT_MAX_FILES:
+        rows.append(f"... ({len(files) - COMMIT_MAX_FILES} more files not listed)")
+    patch = _patch_excerpt(files, PATCH_MAX_LINES)
+    if patch:
+        rows.append(f"patch excerpt (at most {PATCH_MAX_LINES} lines):")
+        rows.extend(patch)
+    return "\n".join(rows)
+
+
+_register(
+    ToolSpec(
+        name="commit_changes",
+        description=(
+            "Files changed by the failing commit vs its first parent: paths, additions,"
+            f" deletions and a patch excerpt (at most {PATCH_MAX_LINES} lines). Use it to"
+            " see whether the code or config changed right before the failure."
+        ),
+        parameters={"type": "object", "properties": {}},
+        args_model=NoArgs,
+        scope="commit",
+        run=commit_changes,
     )
 )
 
