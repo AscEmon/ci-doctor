@@ -51,6 +51,23 @@ Re-check dev labels after a guideline change with
 `uv run cidoc label review --category other,ci_config,signing_secrets`. It uses the
 `label edit` flow and never shows model predictions. It refuses `test1`/`test2`.
 
+## Agent (Phase 2)
+
+`uv run cidoc analyze <job_id> --agent` lets the model fetch context beyond the log
+before it answers, through read-only tools bound to the failing commit: `read_file`,
+`list_dir`, `read_workflow`, `search_log`, `read_log`, `sibling_jobs`, `previous_run`
+and `commit_changes`. It prints each tool call (arguments, a short preview of the
+output) and the final diagnosis, including the repository files it relied on.
+
+- `--max-steps N` caps tool calls (default 6); after that the model must answer.
+- `--tools a,b,...` offers only those tools (for ablations); default all.
+- `--no-call` prints the system instruction, the excerpt and the tool list, no API call.
+
+Tools use your `GITHUB_TOKEN` (read-only) and nothing else on the network. Their results
+are cached in `data/cache/agent_tools/` and never expire: a commit, a finished run and a
+stored log do not change. The commit that later fixed the failure is never shown to the
+agent. Without `--agent`, `cidoc analyze` is the Phase 1 analyzer, unchanged.
+
 ## Development checks
 
 ```sh

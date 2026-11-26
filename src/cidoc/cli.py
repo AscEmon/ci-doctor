@@ -12,6 +12,17 @@ from rich.console import Console
 from rich.table import Table
 from rich.text import Text
 
+from cidoc.agent.budget import BudgetedToolProvider
+from cidoc.agent.display import render_agent_input, render_evidence_files, render_trajectory
+from cidoc.agent.loop import DEFAULT_MAX_STEPS, run_agent_cached
+from cidoc.agent.runtime import (
+    agent_setup,
+    job_context,
+    make_toolbox,
+    open_tools_github,
+    parse_tool_names,
+)
+from cidoc.agent.tools import TOOLS, UnknownToolError
 from cidoc.analyze.cache import ResponseCache, analyze_cached
 from cidoc.analyze.costguard import (
     BudgetedProvider,
@@ -20,9 +31,9 @@ from cidoc.analyze.costguard import (
     estimate_run,
 )
 from cidoc.analyze.display import render_input, render_outputs, render_result, render_usage
-from cidoc.analyze.inputs import InputError, resolve_input
+from cidoc.analyze.inputs import AnalysisInput, InputError, resolve_input
 from cidoc.analyze.preprocess import preprocess
-from cidoc.analyze.prompt import GuidelineError, load_prompt
+from cidoc.analyze.prompt import GuidelineError, Prompt, load_prompt
 from cidoc.config import MissingGeminiKeyError, get_settings
 from cidoc.db import DB_FILENAME, connect
 from cidoc.eval.baseline import REGEX_BASELINE, Predictor, RegexBaseline
@@ -66,7 +77,7 @@ from cidoc.labeling.session import (
     run_session,
 )
 from cidoc.llm.base import LLMError
-from cidoc.llm.factory import create_provider
+from cidoc.llm.factory import create_provider, create_tool_provider
 from cidoc.logview import build_focus_view, build_view, clean_log, read_log
 from cidoc.miner.discover import RepoInfo, discover
 from cidoc.miner.prune import apply_prune, plan_prune
@@ -362,16 +373,50 @@ def analyze(
             "--no-call", help="Print what would be sent and stop: no API call, no key needed."
         ),
     ] = False,
+    agent: Annotated[
+        bool,
+        typer.Option(
+            "--agent",
+            help="Phase 2: let the model call read-only tools (repo files, run context,"
+            " full log) before it answers. Needs a stored job id.",
+        ),
+    ] = False,
+    max_steps: Annotated[
+        int | None,
+        typer.Option(
+            "--max-steps",
+            min=1,
+            help=f"With --agent: tool calls allowed (default {DEFAULT_MAX_STEPS}).",
+        ),
+    ] = None,
+    tools: Annotated[
+        str | None,
+        typer.Option(
+            "--tools",
+            metavar="a,b,...",
+            help=f"With --agent: only these tools (default all: {','.join(TOOLS)}).",
+        ),
+    ] = None,
 ) -> None:
     """Diagnose one failed job with the LLM."""
     settings = get_settings()
+    if not agent and (max_steps is not None or tools is not None):
+        console.print("[red]--max-steps and --tools only apply to --agent.[/red]")
+        raise typer.Exit(2)
     try:
         source = resolve_input(target, settings.data_dir, open_db)
         prompt = load_prompt()
-    except (InputError, GuidelineError) as exc:
+        tool_names = parse_tool_names(tools)
+    except (InputError, GuidelineError, UnknownToolError) as exc:
         console.print(Text(str(exc), style="red"))
         raise typer.Exit(2) from None
     name = model or settings.cidoc_model
+    if agent:
+        analyze_agent(
+            source, prompt, name, budget, refresh, max_cost, show_input, no_call, tool_names,
+            max_steps,
+        )  # fmt: skip
+        return
     if source.redactions:
         console.print(f"[yellow]Masked {source.redactions} secret-looking values before sending.")
     if source.renumbered:
@@ -416,6 +461,85 @@ def analyze(
         render_outputs(console, result)
     render_result(console, result, clean_log(source.text))
     render_usage(console, result, price)
+    if not result.ok:
+        raise typer.Exit(1)
+
+
+def analyze_agent(
+    source: AnalysisInput,
+    base: Prompt,
+    name: str,
+    budget: int | None,
+    refresh: bool,
+    max_cost: float | None,
+    show_input: bool,
+    no_call: bool,
+    tool_names: list[str] | None,
+    max_steps: int | None,
+) -> None:
+    """`cidoc analyze --agent`: run the agent and print its trajectory and diagnosis."""
+    settings = get_settings()
+    if source.job_id is None:
+        console.print(
+            Text("--agent needs a stored job id: its tools read the job's run and repo.", "red")
+        )
+        raise typer.Exit(2)
+    setup = agent_setup(base, tool_names, max_steps)
+    log = preprocess(source.text, source.failed_steps, budget or settings.cidoc_token_budget)
+    console.print(
+        Text(
+            f"{source.source}: {log.total_lines} lines, ~{log.estimated_tokens} tokens of"
+            f" excerpt (agent prompt {setup.prompt.version}, model {name},"
+            f" tools {','.join(setup.tools)}, max {setup.limits.max_steps} steps)",
+            style="dim",
+        )
+    )
+    if show_input or no_call:
+        render_agent_input(console, setup.prompt, log, name)
+    if no_call:
+        return
+    try:
+        provider = create_tool_provider(settings, name)
+    except MissingGeminiKeyError as exc:
+        console.print(Text(str(exc), style="red"))
+        raise typer.Exit(2) from None
+    price = settings.price_for(provider.model)
+    if max_cost is not None:
+        if price is None:
+            console.print(
+                Text(f"--max-cost needs a price for {provider.model}: set CIDOC_PRICES.", "red")
+            )
+            raise typer.Exit(2)
+        provider = BudgetedToolProvider(provider, CostGuard(max_cost, price))
+    ctx = job_context(source.job_id, source.text, open_db)
+    github = open_tools_github(settings.github_token, settings.github_api_url)
+    try:
+        toolbox = make_toolbox(ctx, github, setup, settings.data_dir)
+        result = run_agent_cached(
+            provider,
+            log,
+            setup.prompt,
+            toolbox,
+            ResponseCache.in_data_dir(settings.data_dir),
+            setup.limits,
+            price=price,
+            refresh=refresh,
+        )
+    except BudgetExceededError as exc:
+        console.print(Text(f"Stopped: {exc}", style="yellow"))
+        raise typer.Exit(1) from None
+    except LLMError as exc:
+        console.print(Text(str(exc), style="red"))
+        raise typer.Exit(1) from None
+    finally:
+        github.close()
+    if show_input:
+        render_outputs(console, result)
+    if result.trajectory is not None:
+        render_trajectory(console, result.trajectory, cached=result.cached)
+    console.rule("diagnosis", style="cyan")
+    render_result(console, result, ctx.log_lines)
+    render_evidence_files(console, result)
     if not result.ok:
         raise typer.Exit(1)
 

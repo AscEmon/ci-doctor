@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from cidoc.analyze.preprocess import estimate_tokens
-from cidoc.llm.base import LLMProvider, StructuredResponse
+from cidoc.llm.base import LLMProvider, StructuredResponse, Usage
 from cidoc.llm.pricing import Price
 
 # A diagnosis JSON is ~100-250 tokens; leave room for thinking tokens, billed as output.
@@ -59,7 +59,9 @@ class CostGuard:
             raise BudgetExceededError(self.spent, next_cost, self.max_cost)
 
     def charge(self, response: StructuredResponse) -> None:
-        usage = response.usage
+        self.charge_usage(response.usage)
+
+    def charge_usage(self, usage: Usage) -> None:
         self.spent += self.price.cost(usage.input_tokens, usage.output_tokens)
         self.calls += 1
 

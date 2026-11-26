@@ -55,6 +55,10 @@ class FakeGitHub:
     def __init__(self, routes: dict[str, Route] | None = None) -> None:
         self.routes: dict[str, Route] = dict(routes or {})
         self.calls: list[tuple[str, dict[str, Any] | None]] = []
+        self.closed = False
+
+    def close(self) -> None:
+        self.closed = True
 
     def get_json(self, url: str, params: dict[str, Any] | None = None) -> Any:
         self.calls.append((url, params))
