@@ -57,9 +57,16 @@ class RunFile:
 
 
 def run_path(data_dir: Path, model: str, now: datetime, agent: bool = False) -> Path:
+    """A new file name; never an existing run (two runs can finish in the same second,
+    e.g. cached ablation runs back to back): "_2", "_3", ... are added as needed."""
     stamp = now.strftime("%Y%m%dT%H%M%SZ")
-    suffix = "_agent" if agent else ""
-    return data_dir / RUNS_DIRNAME / f"{stamp}_{_UNSAFE.sub('_', model)}{suffix}.json"
+    stem = f"{stamp}_{_UNSAFE.sub('_', model)}{'_agent' if agent else ''}"
+    path = data_dir / RUNS_DIRNAME / f"{stem}.json"
+    n = 2
+    while path.exists():
+        path = data_dir / RUNS_DIRNAME / f"{stem}_{n}.json"
+        n += 1
+    return path
 
 
 def item_to_dict(item: EvalItem) -> dict[str, Any]:

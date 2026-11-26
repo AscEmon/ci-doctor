@@ -612,3 +612,20 @@ def test_show_bad_file_exits_2(data_dir: Path) -> None:
 
     assert result.exit_code == 2
     assert "cannot read run file" in result.output
+
+
+def test_run_path_never_returns_an_existing_file(tmp_path: Path) -> None:
+    from datetime import UTC, datetime
+
+    from cidoc.eval.results import run_path
+
+    now = datetime(2026, 11, 26, 8, 0, 0, tzinfo=UTC)
+    first = run_path(tmp_path, "m", now)
+    first.parent.mkdir(parents=True)
+    first.write_text("{}")
+    second = run_path(tmp_path, "m", now)
+    second.write_text("{}")
+
+    assert first.name == "20261126T080000Z_m.json"
+    assert second.name == "20261126T080000Z_m_2.json"
+    assert run_path(tmp_path, "m", now).name == "20261126T080000Z_m_3.json"
