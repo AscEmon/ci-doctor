@@ -59,11 +59,17 @@ def render_tool_calls(console: Console, trajectory: Trajectory, indent: str = ""
         console.print(Text(f"{indent}   {call.preview}", style="dim"), soft_wrap=True)
 
 
+def render_warnings(console: Console, trajectory: Trajectory, indent: str = "") -> None:
+    for warning in trajectory.warnings:
+        console.print(Text(f"{indent}warning: {warning}", style="yellow"), soft_wrap=True)
+
+
 def render_trajectory(console: Console, trajectory: Trajectory, cached: bool = False) -> None:
     title = "agent trajectory" + (" (cached: no calls this run)" if cached else "")
     console.rule(title, style="cyan")
     render_tool_calls(console, trajectory)
     console.print(Text(trajectory_summary(trajectory), style="dim"), soft_wrap=True)
+    render_warnings(console, trajectory)
 
 
 def render_evidence_files(console: Console, result: AnalysisResult) -> None:

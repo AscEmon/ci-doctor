@@ -305,7 +305,6 @@ def test_an_invalid_submission_is_rejected_once_then_accepted() -> None:
     [
         ({"confidence": 2}, "confidence"),
         ({"evidence_lines": [999]}, "past the last log line 6"),
-        ({"evidence_files": ["pubspec.yaml"]}, "path:line"),
         ({"root_cause": "x" * 300}, "root_cause"),
     ],
 )
@@ -556,3 +555,57 @@ def test_worst_case_estimate_counts_earlier_results_compacted() -> None:
     assert sizes[1] - sizes[0] == limits.cap_tokens
     assert sizes[2] - sizes[1] == COMPACT_RESULT_TOKENS
     assert sizes[3] - sizes[2] == COMPACT_RESULT_TOKENS
+
+
+# --- lenient evidence_files -----------------------------------------------------------------
+
+
+def test_invalid_evidence_files_entries_are_dropped_not_fatal() -> None:
+    provider = ScriptedToolProvider(
+        turn(submit(evidence_files=["app/build.gradle", "pubspec.yaml:12"]))
+    )
+
+    result = agent(provider)
+
+    assert result.ok
+    assert result.diagnosis.evidence_files == ["pubspec.yaml:12"]
+    assert result.trajectory.warnings == [
+        "dropped evidence_files entry 'app/build.gradle': not \"path:line\""
+    ]
+    assert result.trajectory.forced == []  # accepted at once, no validation retry
+    assert len(provider.requests) == 1
+
+
+@pytest.mark.parametrize(
+    ("files", "kept", "warning"),
+    [
+        (["a.dart:1", 7, "b.dart:x"], ["a.dart:1"], "entry 7: not"),
+        ("pubspec.yaml:3", [], "dropped evidence_files 'pubspec.yaml:3': not a list"),
+        ([f"f{n}.dart:{n}" for n in range(12)], [f"f{n}.dart:{n}" for n in range(10)], "over 10"),
+    ],
+)
+def test_evidence_files_cleaning(files: Any, kept: list[str], warning: str) -> None:
+    provider = ScriptedToolProvider(turn(submit(evidence_files=files)))
+
+    result = agent(provider)
+
+    assert result.ok
+    assert result.diagnosis.evidence_files == kept
+    assert any(warning in w for w in result.trajectory.warnings), result.trajectory.warnings
+
+
+def test_valid_evidence_files_produce_no_warnings() -> None:
+    result = agent(ScriptedToolProvider(turn(submit(evidence_files=["lib/main.dart:3"]))))
+
+    assert result.trajectory.warnings == []
+
+
+def test_other_validation_errors_still_fail() -> None:
+    bad = submit(evidence_files=["app/build.gradle"], confidence=3)
+    provider = ScriptedToolProvider(turn(bad), turn(bad))
+
+    result = agent(provider)
+
+    assert not result.ok
+    assert result.failure is not None
+    assert "confidence" in result.failure

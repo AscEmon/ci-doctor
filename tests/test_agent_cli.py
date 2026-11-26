@@ -169,3 +169,16 @@ def test_input_cap_comes_from_cidoc_agent_max_input(
     assert provider.requests[0]["force"] == ["submit_diagnosis"]
     assert "forced submit: max_input_tokens" in result.output
     assert "input per call 1,000 (of 3,000)" in result.output
+
+
+def test_dropped_evidence_files_are_shown_as_warnings(
+    data_dir: Path, monkeypatch: pytest.MonkeyPatch, github: FakeGitHub
+) -> None:
+    store_job(data_dir, 42, log_text())
+    script(monkeypatch, turn(submit(evidence_files=["app/build.gradle", "pubspec.yaml:12"])))
+
+    result = run("42", "--agent")
+
+    assert result.exit_code == 0, result.output
+    assert "warning: dropped evidence_files entry 'app/build.gradle'" in result.output
+    assert "pubspec.yaml:12" in result.output

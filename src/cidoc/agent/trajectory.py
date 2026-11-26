@@ -51,6 +51,9 @@ class Trajectory:
     forced: list[str] = field(default_factory=list)
     """Why submit_diagnosis was forced, in order: max_steps, max_input_tokens,
     text_reprompt, validation_retry."""
+    warnings: list[str] = field(default_factory=list)
+    """Problems in the accepted answer that were fixed by dropping parts of it (invalid
+    evidence_files entries)."""
     stop: str = FAILED
     """SUBMITTED when a valid submit_diagnosis ended the run, else FAILED."""
 

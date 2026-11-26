@@ -32,6 +32,9 @@ AGENT_PROMPT_REVISION = 2
 """Bumped on a deliberate change of the agent instructions; v2: verification checklist."""
 HISTORY_POLICY = "compact-answered-results-300"
 """How earlier tool results are resent (agent.loop); part of the version hash."""
+EVIDENCE_FILES_POLICY = "drop-invalid-entries"
+"""How submit_diagnosis evidence_files are validated (agent.loop); a change alters which
+answers are accepted, so it is part of the version hash."""
 SUBMIT_FUNCTION = "submit_diagnosis"
 
 
@@ -219,6 +222,7 @@ def build_agent_prompt(
             "functions": [[f.name, f.description, f.parameters] for f in functions],
             "limits": [max_steps, max_input_tokens, cap_tokens],
             "history": HISTORY_POLICY,
+            "evidence_files": EVIDENCE_FILES_POLICY,
         },
         sort_keys=True,
     )

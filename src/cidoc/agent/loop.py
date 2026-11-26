@@ -40,7 +40,7 @@ from cidoc.agent.trajectory import (
 from cidoc.analyze.analyzer import AnalysisResult, InvalidResponseError
 from cidoc.analyze.cache import ResponseCache, cache_key, log_hash
 from cidoc.analyze.preprocess import PreprocessedLog, estimate_tokens
-from cidoc.analyze.schema import AgentDiagnosis
+from cidoc.analyze.schema import EVIDENCE_FILES_MAX, AgentDiagnosis, is_evidence_file
 from cidoc.llm.base import (
     FunctionCall,
     FunctionResult,
@@ -87,8 +87,45 @@ class AgentLimits:
 ResultWrapper = Callable[[ToolOutput], str]
 
 
-def parse_submit(args: dict[str, Any], total_lines: int) -> AgentDiagnosis:
-    """submit_diagnosis arguments as a validated diagnosis, or InvalidResponseError."""
+WARNING_ENTRY_CHARS = 80
+
+
+def _shown(item: object) -> str:
+    text = repr(item)
+    return text if len(text) <= WARNING_ENTRY_CHARS else text[:WARNING_ENTRY_CHARS] + "..."
+
+
+def clean_evidence_files(args: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
+    """`args` with invalid evidence_files entries dropped, and a warning for each.
+
+    An entry that is not a "path:line" string ("app/build.gradle" has no line) or comes
+    after the first EVIDENCE_FILES_MAX is dropped rather than failing the diagnosis: the
+    files are supporting detail, the category and cause are what matter.
+    """
+    if "evidence_files" not in args:
+        return args, []
+    value = args["evidence_files"]
+    if not isinstance(value, list):
+        warning = f"dropped evidence_files {_shown(value)}: not a list"
+        return {**args, "evidence_files": []}, [warning]
+    kept: list[str] = []
+    warnings: list[str] = []
+    for item in value:
+        if not is_evidence_file(item):
+            warnings.append(f'dropped evidence_files entry {_shown(item)}: not "path:line"')
+        elif len(kept) >= EVIDENCE_FILES_MAX:
+            warnings.append(
+                f"dropped evidence_files entry {_shown(item)}: over {EVIDENCE_FILES_MAX}"
+            )
+        else:
+            kept.append(item)
+    return {**args, "evidence_files": kept}, warnings
+
+
+def parse_submit(args: dict[str, Any], total_lines: int) -> tuple[AgentDiagnosis, list[str]]:
+    """submit_diagnosis arguments as a validated diagnosis plus warnings about what was
+    dropped (invalid evidence_files entries), or InvalidResponseError."""
+    args, warnings = clean_evidence_files(args)
     try:
         diagnosis = AgentDiagnosis.model_validate(args)
     except ValidationError as exc:
@@ -102,7 +139,7 @@ def parse_submit(args: dict[str, Any], total_lines: int) -> AgentDiagnosis:
         raise InvalidResponseError(
             f"schema mismatch: evidence_lines {beyond} are past the last log line {total_lines}"
         )
-    return diagnosis
+    return diagnosis, warnings
 
 
 def _message_tokens(message: Message) -> int:
@@ -181,6 +218,7 @@ def run_agent(
     reprompted = retried = False
     failure: str | None = None
     diagnosis: AgentDiagnosis | None = None
+    warnings: list[str] = []
 
     for turn in range(1, limits.max_model_calls + 1):
         sent = sent_view(messages, compact)
@@ -211,7 +249,7 @@ def run_agent(
         submit = next((c for c in response.function_calls if c.name == SUBMIT_FUNCTION), None)
         if submit is not None:
             try:
-                diagnosis = parse_submit(submit.args, log.total_lines)
+                diagnosis, warnings = parse_submit(submit.args, log.total_lines)
                 break
             except InvalidResponseError as exc:
                 failure = str(exc)
@@ -273,6 +311,7 @@ def run_agent(
         else None,
         hit_max_steps=run.hit_max_steps,
         forced=run.forced,
+        warnings=warnings,
         stop=SUBMITTED if diagnosis is not None else FAILED,
     )
     return AnalysisResult(

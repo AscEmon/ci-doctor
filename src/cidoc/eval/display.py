@@ -4,7 +4,7 @@ from rich.console import Console
 from rich.table import Table
 from rich.text import Text
 
-from cidoc.agent.display import render_tool_calls, trajectory_summary
+from cidoc.agent.display import render_tool_calls, render_warnings, trajectory_summary
 from cidoc.analyze.costguard import CallEstimate, RunEstimate
 from cidoc.analyze.schema import AgentDiagnosis
 from cidoc.eval.compare import Comparison, MetricDelta
@@ -382,4 +382,5 @@ def render_items(
             console.print(
                 Text(f"    {trajectory_summary(trajectory)}", style="dim"), soft_wrap=True
             )
+            render_warnings(console, trajectory, indent="    ")
     console.rule(style="dim")

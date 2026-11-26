@@ -67,6 +67,11 @@ EVIDENCE_FILES_MAX = 10
 _EVIDENCE_FILE = re.compile(r"^\S[^\n]*:\d+$")
 
 
+def is_evidence_file(item: object) -> bool:
+    """A "path:line" string, as evidence_files entries must be."""
+    return isinstance(item, str) and bool(_EVIDENCE_FILE.match(item.strip()))
+
+
 class AgentDiagnosis(Diagnosis):
     """The agent's answer (submit_diagnosis): a Diagnosis plus the repository files it
     relied on. Phase 1 fields are validated exactly as for Diagnosis."""
