@@ -17,8 +17,8 @@ from cidoc.eval.results import RunFile
 from cidoc.labeling.labels import Label
 from cidoc.llm.pricing import Price
 
-# (key in the metrics dict, label, higher is better)
-COMPARED_METRICS: tuple[tuple[str, str, bool], ...] = (
+# (key in the metrics dict, label, higher is better; None: neither, just a difference)
+COMPARED_METRICS: tuple[tuple[str, str, bool | None], ...] = (
     ("accuracy", "accuracy", True),
     ("macro_f1", "macro-F1", True),
     ("confident_accuracy", "accuracy, confidence 3", True),
@@ -28,6 +28,11 @@ COMPARED_METRICS: tuple[tuple[str, str, bool], ...] = (
     ("latency_p95", "latency p95", False),
     ("failed", "failed", False),
     ("blocked", "blocked", False),
+    ("mean_model_calls", "model calls per item", False),
+    ("mean_input_tokens", "input tokens per item", False),
+    ("mean_tool_calls", "tool calls per item", None),
+    ("used_tools_rate", "items that used a tool", None),
+    ("hit_max_steps", "items that hit max_steps", False),
 )
 
 
@@ -37,7 +42,7 @@ class MetricDelta:
     label: str
     a: float | None
     b: float | None
-    higher_is_better: bool
+    higher_is_better: bool | None
 
     @property
     def delta(self) -> float | None:
@@ -45,8 +50,8 @@ class MetricDelta:
 
     @property
     def improved(self) -> bool | None:
-        """Whether B is better than A; None when equal or unknown."""
-        if self.delta is None or self.delta == 0:
+        """Whether B is better than A; None when equal, unknown or neither."""
+        if self.delta is None or self.delta == 0 or self.higher_is_better is None:
             return None
         return (self.delta > 0) == self.higher_is_better
 
@@ -167,6 +172,17 @@ def compare_runs(
     notes: list[str] = []
     if a.info.split != b.info.split:
         notes.append(f"The runs scored different splits ({a.info.split} vs {b.info.split}).")
+    if a.info.agent != b.info.agent:
+        agent_side, phase1_side = ("B", "A") if b.info.agent else ("A", "B")
+        notes.append(
+            f"{agent_side} is an agent run, {phase1_side} is Phase 1: both see the same log"
+            " excerpt; the difference is the tools (and the extra model calls they take)."
+        )
+    elif a.info.agent and (a.info.tools, a.info.max_steps) != (b.info.tools, b.info.max_steps):
+        notes.append(
+            f"Agent settings differ: A tools {a.info.tools} max_steps {a.info.max_steps},"
+            f" B tools {b.info.tools} max_steps {b.info.max_steps}."
+        )
     if a.info.guideline_hash != b.info.guideline_hash:
         notes.append("The runs used different labeling guidelines (guideline hash differs).")
     if unlabeled:

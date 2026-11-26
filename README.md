@@ -69,6 +69,9 @@ per item, the share of items that used a tool, tool usage counts, model calls an
 per item, and items that hit `max_steps`. `--dry-run` and `--max-cost` count every
 uncached item at its worst case (`max_steps` tool rounds plus the final answer), and
 `CIDOC_RPM` applies to every model call, agent steps included.
+`cidoc eval --show <run> --job <id>` prints an agent item's full trajectory, and
+`cidoc eval --compare <phase1.json> <agent.json>` compares a Phase 1 run with an agent
+run on the same split, including model calls, tokens and tool calls per item.
 
 Tools use your `GITHUB_TOKEN` (read-only) and nothing else on the network. Their results
 are cached in `data/cache/agent_tools/` and never expire: a commit, a finished run and a

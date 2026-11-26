@@ -254,7 +254,7 @@ def eval_command(
             label.job_id: label.root_cause
             for label in load_labels(settings.data_dir / LABELS_FILENAME)
         }
-        render_items(console, saved, items, root_causes)
+        render_items(console, saved, items, root_causes, show_trajectory=job is not None)
         unscored = sum(item.error is not None for item in saved.items)
         wrong_total = sum(item.error is None and not item.correct for item in saved.items)
         console.print(

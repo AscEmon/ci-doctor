@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from cidoc.config import Settings, get_settings
+from tests.agent_fakes import FakeGitHub
 from tests.fakes import VALID_DIAGNOSIS, ScriptedProvider, ok
 
 
@@ -33,3 +34,11 @@ def provider(monkeypatch: pytest.MonkeyPatch) -> ScriptedProvider:
 
     monkeypatch.setattr("cidoc.cli.create_provider", create)
     return scripted
+
+
+@pytest.fixture
+def github(monkeypatch: pytest.MonkeyPatch) -> FakeGitHub:
+    """The GitHub client agent tools get in CLI commands; 404s anything not routed."""
+    fake = FakeGitHub()
+    monkeypatch.setattr("cidoc.cli.open_tools_github", lambda token, base_url: fake)
+    return fake

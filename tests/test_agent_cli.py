@@ -17,13 +17,6 @@ def run(*args: str) -> Any:
     return CliRunner().invoke(app, ["analyze", *args])
 
 
-@pytest.fixture
-def github(monkeypatch: pytest.MonkeyPatch) -> FakeGitHub:
-    fake = FakeGitHub()
-    monkeypatch.setattr("cidoc.cli.open_tools_github", lambda token, base_url: fake)
-    return fake
-
-
 def script(monkeypatch: pytest.MonkeyPatch, *turns: Any) -> ScriptedToolProvider:
     scripted = ScriptedToolProvider(*turns)
 

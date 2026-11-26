@@ -4,7 +4,9 @@ from rich.console import Console
 from rich.table import Table
 from rich.text import Text
 
+from cidoc.agent.display import render_tool_calls, trajectory_summary
 from cidoc.analyze.costguard import CallEstimate, RunEstimate
+from cidoc.analyze.schema import AgentDiagnosis
 from cidoc.eval.compare import Comparison, MetricDelta
 from cidoc.eval.metrics import FAILED, EvalItem, Metrics
 from cidoc.eval.results import RunFile, RunInfo
@@ -191,13 +193,21 @@ def render_estimate(
         console.print(Text(note, style="dim"))
 
 
+_COUNTS = ("failed", "blocked", "hit_max_steps")
+_MEANS = ("mean_model_calls", "mean_tool_calls")
+
+
 def _metric(delta: MetricDelta, value: float | None) -> str:
     if delta.key == "mean_cost":
         return usd(value)
     if delta.key.startswith("latency"):
         return seconds(value)
-    if delta.key in ("failed", "blocked"):
+    if delta.key in _COUNTS:
         return "—" if value is None else str(int(value))
+    if delta.key in _MEANS:
+        return number(value)
+    if delta.key == "mean_input_tokens":
+        return number(value, 0)
     return pct(value)
 
 
@@ -209,8 +219,12 @@ def _delta(delta: MetricDelta) -> Text:
         shown = f"{change:+.6f}"
     elif delta.key.startswith("latency"):
         shown = f"{change:+.2f}s"
-    elif delta.key in ("failed", "blocked"):
+    elif delta.key in _COUNTS:
         shown = f"{int(change):+d}"
+    elif delta.key in _MEANS:
+        shown = f"{change:+.2f}"
+    elif delta.key == "mean_input_tokens":
+        shown = f"{change:+,.0f}"
     else:
         shown = f"{change * 100:+.1f} pts"
     style = {True: "green", False: "red", None: "dim"}[delta.improved]
@@ -219,14 +233,17 @@ def _delta(delta: MetricDelta) -> Text:
 
 def _run_label(run: RunFile) -> str:
     version = run.info.prompt_version or "no prompt"
-    return f"{run.info.model} ({version}, {run.info.split} split, {run.info.created_at[:16]})"
+    model = run.info.model
+    if run.info.agent:
+        model += f" agent (max {run.info.max_steps} steps, tools {','.join(run.info.tools or [])})"
+    return f"{model} ({version}, {run.info.split} split, {run.info.created_at[:16]})"
 
 
 def render_comparison(
     console: Console, a: RunFile, b: RunFile, comparison: Comparison, max_rows: int = 50
 ) -> None:
-    console.print(Text(f"A: {_run_label(a)}"))
-    console.print(Text(f"B: {_run_label(b)}"))
+    console.print(Text(f"A: {_run_label(a)}"), soft_wrap=True)
+    console.print(Text(f"B: {_run_label(b)}"), soft_wrap=True)
     scope = f"{comparison.shared} shared items"
     if comparison.recomputed:
         scope += (
@@ -299,8 +316,10 @@ def render_items(
     run: RunFile,
     items: list[EvalItem],
     fallback_root_causes: dict[int, str],
+    show_trajectory: bool = False,
 ) -> None:
-    """One block per item: the human label next to the prediction.
+    """One block per item: the human label next to the prediction. Agent items list the
+    tools they used; with `show_trajectory` (--show --job) every tool call is printed.
 
     `fallback_root_causes` (from labels.jsonl) fills in the human root cause for runs
     saved before run files stored it; such causes are marked as possibly newer.
@@ -340,9 +359,21 @@ def render_items(
                 "",
             ),
         ]
+        if isinstance(diagnosis, AgentDiagnosis) and diagnosis.evidence_files:
+            rows.append(("files", ", ".join(diagnosis.evidence_files), ""))
+        trajectory = item.result.trajectory
+        if trajectory is not None and not show_trajectory:
+            used = ", ".join(call.name for call in trajectory.tool_calls) or "none"
+            rows.append(("tools", used, f"  ({trajectory_summary(trajectory)})"))
         for name, value, row_note in rows:
             row = Text(f"  {name + ':':<11}", style="dim")
             row.append(value)
             row.append(row_note, style="dim")
             console.print(row, soft_wrap=True, highlight=False)
+        if trajectory is not None and show_trajectory:
+            console.print(Text("  trajectory:", style="dim"))
+            render_tool_calls(console, trajectory, indent="    ")
+            console.print(
+                Text(f"    {trajectory_summary(trajectory)}", style="dim"), soft_wrap=True
+            )
     console.rule(style="dim")
