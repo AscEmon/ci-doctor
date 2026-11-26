@@ -11,7 +11,7 @@ retries it.
 import math
 from collections import Counter
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from cidoc.analyze.analyzer import AnalysisResult
 from cidoc.analyze.usage import summarize
@@ -88,6 +88,20 @@ class Metrics:
     blocked: int
     errored: int
     """Items left out because the API failed after retries."""
+    mean_model_calls: float | None = None
+    """Model calls per scored item (from each result's original calls); None if none."""
+    mean_input_tokens: float | None = None
+    mean_output_tokens: float | None = None
+    agent_items: int = 0
+    """Scored items with an agent trajectory; the agent metrics below cover these."""
+    mean_tool_calls: float | None = None
+    """None for runs without agent items (Phase 1, the baseline)."""
+    used_tools_rate: float | None = None
+    """Share of agent items that made at least one tool call."""
+    tool_usage: dict[str, int] = field(default_factory=dict)
+    """Tool name -> calls, over all agent items, most used first."""
+    hit_max_steps: int | None = None
+    """Agent items that used every allowed tool call (submit was forced)."""
 
 
 def _ratio(numerator: float, denominator: int) -> float:
@@ -164,6 +178,8 @@ def compute_metrics(
 
     failures = [item.result.failure for item in items if item.result.failure is not None]
     correct = sum(item.correct for item in items)
+    usage = _usage_means(items)
+    agent = _agent_metrics(items)
     return Metrics(
         n=len(items),
         correct=correct,
@@ -186,4 +202,47 @@ def compute_metrics(
         failed=len(failures),
         blocked=sum(f.startswith(BLOCKED_PREFIX) for f in failures),
         errored=len(all_items) - len(items),
+        mean_model_calls=usage[0],
+        mean_input_tokens=usage[1],
+        mean_output_tokens=usage[2],
+        agent_items=agent.items,
+        mean_tool_calls=agent.mean_tool_calls,
+        used_tools_rate=agent.used_tools_rate,
+        tool_usage=agent.tool_usage,
+        hit_max_steps=agent.hit_max_steps,
+    )
+
+
+def _usage_means(items: Sequence[EvalItem]) -> tuple[float | None, float | None, float | None]:
+    """Mean model calls, input and output tokens per item (the regex baseline has 0)."""
+    if not items:
+        return None, None, None
+    n = len(items)
+    calls = sum(len(item.result.calls) for item in items)
+    tokens_in = sum(c.input_tokens for item in items for c in item.result.calls)
+    tokens_out = sum(c.output_tokens for item in items for c in item.result.calls)
+    return calls / n, tokens_in / n, tokens_out / n
+
+
+@dataclass(frozen=True)
+class AgentMetrics:
+    items: int
+    mean_tool_calls: float | None
+    used_tools_rate: float | None
+    tool_usage: dict[str, int]
+    hit_max_steps: int | None
+
+
+def _agent_metrics(items: Sequence[EvalItem]) -> AgentMetrics:
+    trajectories = [i.result.trajectory for i in items if i.result.trajectory is not None]
+    if not trajectories:
+        return AgentMetrics(0, None, None, {}, None)
+    usage = Counter(call.name for t in trajectories for call in t.tool_calls)
+    n = len(trajectories)
+    return AgentMetrics(
+        items=n,
+        mean_tool_calls=sum(len(t.tool_calls) for t in trajectories) / n,
+        used_tools_rate=sum(t.used_tools for t in trajectories) / n,
+        tool_usage=dict(usage.most_common()),
+        hit_max_steps=sum(t.hit_max_steps for t in trajectories),
     )

@@ -63,6 +63,13 @@ output) and the final diagnosis, including the repository files it relied on.
 - `--tools a,b,...` offers only those tools (for ablations); default all.
 - `--no-call` prints the system instruction, the excerpt and the tool list, no API call.
 
+`uv run cidoc eval --agent [--max-steps N] [--tools ...]` scores the agent on the same
+labels; the run file records `agent`, the tool set and `max_steps`, and adds tool calls
+per item, the share of items that used a tool, tool usage counts, model calls and tokens
+per item, and items that hit `max_steps`. `--dry-run` and `--max-cost` count every
+uncached item at its worst case (`max_steps` tool rounds plus the final answer), and
+`CIDOC_RPM` applies to every model call, agent steps included.
+
 Tools use your `GITHUB_TOKEN` (read-only) and nothing else on the network. Their results
 are cached in `data/cache/agent_tools/` and never expire: a commit, a finished run and a
 stored log do not change. The commit that later fixed the failure is never shown to the

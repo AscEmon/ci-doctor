@@ -48,7 +48,15 @@ from cidoc.eval.display import (
 )
 from cidoc.eval.metrics import compute_metrics
 from cidoc.eval.results import RunInfo, load_run, run_path, write_run
-from cidoc.eval.runner import ALL_SPLITS, LLMPredictor, load_cases, plan_run, run_eval
+from cidoc.eval.runner import (
+    ALL_SPLITS,
+    AgentPredictor,
+    LLMPredictor,
+    load_cases,
+    plan_agent_run,
+    plan_run,
+    run_eval,
+)
 from cidoc.github_client import GitHubClient
 from cidoc.labeling.labels import (
     CATEGORIES,
@@ -188,6 +196,24 @@ def eval_command(
         bool, typer.Option("--wrong", help="With --show: only items predicted wrong.")
     ] = False,
     job: Annotated[int | None, typer.Option("--job", help="With --show: only this job id.")] = None,
+    agent: Annotated[
+        bool,
+        typer.Option("--agent", help="Score the Phase 2 agent (tools before answering)."),
+    ] = False,
+    max_steps: Annotated[
+        int | None,
+        typer.Option(
+            "--max-steps",
+            min=1,
+            help=f"With --agent: tool calls allowed per item (default {DEFAULT_MAX_STEPS}).",
+        ),
+    ] = None,
+    tools: Annotated[
+        str | None,
+        typer.Option(
+            "--tools", metavar="a,b,...", help="With --agent: only these tools (default all)."
+        ),
+    ] = None,
 ) -> None:
     """Score a model against the human labels and save the run to data/eval_runs/.
 
@@ -206,6 +232,14 @@ def eval_command(
     if (wrong or job is not None) and show is None:
         console.print("[red]--wrong and --job only apply to --show.[/red]")
         raise typer.Exit(2)
+    if not agent and (max_steps is not None or tools is not None):
+        console.print("[red]--max-steps and --tools only apply to --agent.[/red]")
+        raise typer.Exit(2)
+    try:
+        tool_names = parse_tool_names(tools)
+    except UnknownToolError as exc:
+        console.print(Text(str(exc), style="red"))
+        raise typer.Exit(2) from None
     if show is not None:
         try:
             saved = load_run(show)
@@ -248,6 +282,10 @@ def eval_command(
         raise typer.Exit(2) from None
     name = model or settings.cidoc_model
     baseline = name == REGEX_BASELINE
+    if baseline and agent:
+        console.print(f"[red]--agent needs an LLM model, not {REGEX_BASELINE}.[/red]")
+        raise typer.Exit(2)
+    setup = agent_setup(prompt, tool_names, max_steps) if agent else None
     price = settings.price_for(name)
     if max_cost is not None and not baseline and price is None:
         console.print(Text(f"--max-cost needs a price for {name}: set CIDOC_PRICES.", "red"))
@@ -272,14 +310,50 @@ def eval_command(
                 " no API calls, $0"
             )
             return
-        plan = plan_run(loaded.cases, prompt, cache, name, budget, refresh=refresh)
+        if setup is not None:
+            plan = plan_agent_run(
+                loaded.cases, setup, cache, name, budget, open_db, refresh=refresh
+            )
+        else:
+            plan = plan_run(loaded.cases, prompt, cache, name, budget, refresh=refresh)
         estimate = estimate_run(plan.calls, plan.cached, price, settings.cidoc_rpm)
-        render_estimate(console, name, estimate, settings.cidoc_rpm, plan.calls, price, max_cost)
+        render_estimate(
+            console,
+            name,
+            estimate,
+            settings.cidoc_rpm,
+            plan.calls,
+            price,
+            max_cost,
+            max_steps=setup.limits.max_steps if setup else None,
+        )
         return
 
     predictor: Predictor
+    github: GitHubClient | None = None
     if baseline:
         predictor, prompt_version, run_budget = RegexBaseline(), None, None
+    elif setup is not None:
+        try:
+            tool_provider = create_tool_provider(settings, name)
+        except MissingGeminiKeyError as exc:
+            console.print(Text(str(exc), style="red"))
+            raise typer.Exit(2) from None
+        if max_cost is not None and price is not None:
+            tool_provider = BudgetedToolProvider(tool_provider, CostGuard(max_cost, price))
+        github = open_tools_github(settings.github_token, settings.github_api_url)
+        predictor = AgentPredictor(
+            tool_provider,
+            setup,
+            cache,
+            budget,
+            settings.data_dir,
+            open_db,
+            github,
+            price=price,
+            refresh=refresh,
+        )
+        prompt_version, run_budget = setup.prompt.version, budget
     else:
         try:
             provider = create_provider(settings, name)
@@ -292,12 +366,16 @@ def eval_command(
         prompt_version, run_budget = prompt.version, budget
 
     total = len(loaded.cases)
-    outcome = run_eval(
-        loaded.cases,
-        predictor,
-        on_item=lambda n, item: render_item(console, n, total, item),
-        stop_on=(BudgetExceededError,),
-    )
+    try:
+        outcome = run_eval(
+            loaded.cases,
+            predictor,
+            on_item=lambda n, item: render_item(console, n, total, item),
+            stop_on=(BudgetExceededError,),
+        )
+    finally:
+        if github is not None:
+            github.close()
     metrics = compute_metrics(outcome.items, price)
     info = RunInfo(
         model=predictor.name,
@@ -310,8 +388,11 @@ def eval_command(
         stopped=outcome.stopped,
         missing=loaded.missing,
         split=split,
+        agent=setup is not None,
+        tools=setup.tools if setup else None,
+        max_steps=setup.limits.max_steps if setup else None,
     )
-    path = run_path(settings.data_dir, predictor.name, datetime.now(UTC))
+    path = run_path(settings.data_dir, predictor.name, datetime.now(UTC), agent=info.agent)
     write_run(path, info, outcome.items, metrics)
     render_summary(console, info, metrics)
     if outcome.stopped:

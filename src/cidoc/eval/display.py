@@ -17,6 +17,10 @@ def pct(value: float | None) -> str:
     return "—" if value is None else f"{value:.1%}"
 
 
+def number(value: float | None, digits: int = 2) -> str:
+    return "—" if value is None else f"{value:,.{digits}f}"
+
+
 def usd(value: float | None) -> str:
     return "unknown" if value is None else f"${value:.6f}"
 
@@ -37,6 +41,10 @@ def render_item(console: Console, n: int, total: int, item: EvalItem) -> None:
     row = Text(f"[{n}/{total}] job {item.job_id} ", style="dim")
     row.append(mark[0], style=mark[1])
     row.append(f" {item.gold} → {predicted}")
+    trajectory = item.result.trajectory
+    if trajectory is not None:
+        tools = len(trajectory.tool_calls)
+        row.append(f" [{tools} tool{'s' if tools != 1 else ''}]", style="dim")
     if item.result.cached:
         row.append(" (cached)", style="dim")
     console.print(row, overflow="ellipsis", no_wrap=True, highlight=False)
@@ -62,10 +70,26 @@ def render_summary(console: Console, info: RunInfo, metrics: Metrics) -> None:
         ("errored (API, not scored)", str(metrics.errored)),
         ("prompt version", info.prompt_version or "—"),
         ("guideline", info.guideline_hash),
+        ("model calls / item", number(metrics.mean_model_calls)),
+        (
+            "tokens / item (in / out)",
+            f"{number(metrics.mean_input_tokens, 0)} / {number(metrics.mean_output_tokens, 0)}",
+        ),
     ]
+    if info.agent:
+        rows += [
+            ("agent tools", ", ".join(info.tools or []) or "—"),
+            ("max steps", str(info.max_steps)),
+            ("tool calls / item", number(metrics.mean_tool_calls)),
+            ("items that used a tool", f"{pct(metrics.used_tools_rate)} of {metrics.agent_items}"),
+            ("items that hit max_steps", str(metrics.hit_max_steps)),
+        ]
     for name, value in rows:
         headline.add_row(name, value)
     console.print(headline)
+    if metrics.tool_usage:
+        usage = ", ".join(f"{name} {count}" for name, count in metrics.tool_usage.items())
+        console.print(Text(f"Tool usage: {usage}"), soft_wrap=True)
 
     per = Table(title="per category", title_justify="left")
     for column in ("category", "support", "predicted", "precision", "recall", "F1"):
@@ -123,15 +147,18 @@ def render_estimate(
     calls: list[CallEstimate],
     price: Price | None,
     max_cost: float | None,
+    max_steps: int | None = None,
 ) -> None:
-    table = Table(title=f"dry run: {model}", title_justify="left")
+    """`max_steps` is set for agent runs: their items are estimated at the worst case."""
+    title = f"dry run: {model}" + (" (agent)" if max_steps is not None else "")
+    table = Table(title=title, title_justify="left")
     table.add_column(style="bold")
     table.add_column(justify="right")
     table.show_header = False
     rows = [
         ("items", str(estimate.items)),
         ("cached (free)", str(estimate.cached)),
-        ("API calls", str(estimate.calls)),
+        ("API calls" if max_steps is None else "model calls (worst case)", str(estimate.calls)),
         ("input tokens (est.)", f"{estimate.input_tokens:,}"),
         ("output tokens (allowance)", f"{estimate.output_tokens:,}"),
         ("cost (est.)", usd(estimate.cost)),
@@ -144,6 +171,13 @@ def render_estimate(
         "No API calls were made.",
         "Estimates use 4 characters per token; validation retries are not included.",
     ]
+    if max_steps is not None:
+        notes.append(
+            f"Agent: each uncached item is counted at its worst case, {max_steps} tool"
+            f" rounds and the final submit ({max_steps + 1} model calls), each resending the"
+            " conversation; most items stop sooner. GitHub calls for tools are free but"
+            " not counted."
+        )
     if price is None and estimate.calls:
         notes.append(f"No price configured for {model}: set CIDOC_PRICES.")
     if max_cost is not None and price is not None:

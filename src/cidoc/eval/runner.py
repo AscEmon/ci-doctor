@@ -14,6 +14,10 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from cidoc.agent.budget import BudgetedToolProvider, estimate_item_calls
+from cidoc.agent.loop import agent_cache_key, run_agent_cached
+from cidoc.agent.runtime import AgentSetup, job_context, make_toolbox
+from cidoc.agent.tools import GitHubReader
 from cidoc.analyze.analyzer import AnalysisResult
 from cidoc.analyze.cache import ResponseCache, analyze_cached, cache_key, log_hash
 from cidoc.analyze.costguard import BudgetExceededError, CallEstimate, estimate_call
@@ -23,7 +27,8 @@ from cidoc.analyze.prompt import Prompt
 from cidoc.eval.baseline import Predictor
 from cidoc.eval.metrics import EvalItem
 from cidoc.labeling.labels import DEV_SPLIT, LABELS_FILENAME, Label, load_labels, newest_labels
-from cidoc.llm.base import LLMProvider
+from cidoc.llm.base import LLMProvider, ToolCallingProvider
+from cidoc.llm.pricing import Price
 
 ALL_SPLITS = "all"
 """`cidoc eval --split all`: every label, whatever its split."""
@@ -99,7 +104,8 @@ class LLMPredictor:
 @dataclass(frozen=True)
 class RunPlan:
     calls: list[CallEstimate]
-    """One estimate per uncached case, in run order."""
+    """Estimated model calls of the uncached cases, in run order (one per case for
+    Phase 1; up to max_steps + 1 per case for the agent)."""
     cached: int
 
 
@@ -124,6 +130,90 @@ def plan_run(
             cached += 1
         else:
             calls.append(estimate_call(prompt.system, prompt.user(log)))
+    return RunPlan(calls, cached)
+
+
+class AgentPredictor:
+    """The Phase 2 agent as an eval model. Same excerpt as Phase 1, plus tools bound to
+    each job's run; results go through the response cache (resumable) and tool results
+    through the tool cache (re-runs make no GitHub calls for them)."""
+
+    def __init__(
+        self,
+        provider: ToolCallingProvider,
+        setup: AgentSetup,
+        cache: ResponseCache,
+        token_budget: int,
+        data_dir: Path,
+        open_db: Callable[[], sqlite3.Connection],
+        github: GitHubReader | None,
+        price: Price | None = None,
+        refresh: bool = False,
+    ) -> None:
+        self.provider = provider
+        self.setup = setup
+        self.cache = cache
+        self.token_budget = token_budget
+        self.data_dir = data_dir
+        self.open_db = open_db
+        self.github = github
+        self.price = price
+        self.refresh = refresh
+
+    @property
+    def name(self) -> str:
+        return self.provider.model
+
+    def predict(self, source: AnalysisInput) -> AnalysisResult:
+        if source.job_id is None:
+            raise InputError("the agent needs a stored job id")
+        log = preprocess(source.text, source.failed_steps, self.token_budget)
+        ctx = job_context(source.job_id, source.text, self.open_db)
+        if isinstance(self.provider, BudgetedToolProvider):
+            key = agent_cache_key(self.setup.prompt, log, ctx, self.provider.model)
+            if self.refresh or self.cache.get(key) is None:
+                # Do not start an item whose worst case would pass --max-cost.
+                self.provider.check_item(
+                    estimate_item_calls(self.setup.prompt, log, self.setup.limits)
+                )
+        tools = make_toolbox(ctx, self.github, self.setup, self.data_dir)
+        return run_agent_cached(
+            self.provider,
+            log,
+            self.setup.prompt,
+            tools,
+            self.cache,
+            self.setup.limits,
+            price=self.price,
+            refresh=self.refresh,
+        )
+
+
+def plan_agent_run(
+    cases: list[EvalCase],
+    setup: AgentSetup,
+    cache: ResponseCache,
+    model: str,
+    token_budget: int,
+    open_db: Callable[[], sqlite3.Connection],
+    refresh: bool = False,
+) -> RunPlan:
+    """What an agent run would send, without a provider or any API call.
+
+    Cached cases are free. Every other case is estimated at its worst case: max_steps
+    tool rounds and the final submit, each call resending the conversation so far.
+    """
+    calls: list[CallEstimate] = []
+    cached = 0
+    for case in cases:
+        log = preprocess(case.source.text, case.source.failed_steps, token_budget)
+        job_id = case.source.job_id if case.source.job_id is not None else case.label.job_id
+        ctx = job_context(job_id, case.source.text, open_db)
+        key = agent_cache_key(setup.prompt, log, ctx, model)
+        if not refresh and cache.get(key) is not None:
+            cached += 1
+        else:
+            calls.extend(estimate_item_calls(setup.prompt, log, setup.limits))
     return RunPlan(calls, cached)
 
 

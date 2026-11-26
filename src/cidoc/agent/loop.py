@@ -24,6 +24,7 @@ from typing import Any
 
 from pydantic import ValidationError
 
+from cidoc.agent.context import RunContext
 from cidoc.agent.prompt import SUBMIT_FUNCTION, AgentPrompt, wrap_tool_result
 from cidoc.agent.tools import OUTPUT_CAP_TOKENS, ToolBox, ToolOutput
 from cidoc.agent.trajectory import (
@@ -284,12 +285,15 @@ def _record(step: int, turn: int, output: ToolOutput) -> ToolCallRecord:
 # --- cached runs ------------------------------------------------------------------------
 
 
-def agent_digest(log: PreprocessedLog, tools: ToolBox) -> str:
+def agent_digest(log: PreprocessedLog, ctx: RunContext) -> str:
     """What an agent result depends on besides the prompt and model: the excerpt and
     the job its tools read (two jobs with one log can still differ in their repos)."""
-    ctx = tools.env.ctx
     payload = json.dumps([log_hash(log), ctx.job_id, ctx.repo, ctx.run_id, ctx.head_sha])
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def agent_cache_key(prompt: AgentPrompt, log: PreprocessedLog, ctx: RunContext, model: str) -> str:
+    return cache_key(prompt.version, agent_digest(log, ctx), model)
 
 
 def run_agent_cached(
@@ -304,7 +308,7 @@ def run_agent_cached(
     refresh: bool = False,
 ) -> AnalysisResult:
     """The cached result if there is one (unless `refresh`), else run and store it."""
-    digest = agent_digest(log, tools)
+    digest = agent_digest(log, tools.env.ctx)
     key = cache_key(prompt.version, digest, provider.model)
     if not refresh:
         hit = cache.get(key)

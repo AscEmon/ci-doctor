@@ -41,6 +41,12 @@ class RunInfo:
     split: str = "dev"
     """Labels scored: "dev", "test1", "test2" or "all". Runs saved before splits existed
     scored every label, and all of those are read as "dev"; a legacy "test" is "test1"."""
+    agent: bool = False
+    """A Phase 2 agent run (tools before answering); False for Phase 1 and older runs."""
+    tools: list[str] | None = None
+    """Agent runs: the tools offered (for ablations)."""
+    max_steps: int | None = None
+    """Agent runs: the tool-call limit per item."""
 
 
 @dataclass(frozen=True)
@@ -50,9 +56,10 @@ class RunFile:
     metrics: dict[str, Any]
 
 
-def run_path(data_dir: Path, model: str, now: datetime) -> Path:
+def run_path(data_dir: Path, model: str, now: datetime, agent: bool = False) -> Path:
     stamp = now.strftime("%Y%m%dT%H%M%SZ")
-    return data_dir / RUNS_DIRNAME / f"{stamp}_{_UNSAFE.sub('_', model)}.json"
+    suffix = "_agent" if agent else ""
+    return data_dir / RUNS_DIRNAME / f"{stamp}_{_UNSAFE.sub('_', model)}{suffix}.json"
 
 
 def item_to_dict(item: EvalItem) -> dict[str, Any]:
