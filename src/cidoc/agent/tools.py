@@ -13,6 +13,7 @@ Everything a tool returns is redacted with the miner's secret rules and capped a
 
 import base64
 import binascii
+import importlib
 import re
 import time
 from collections.abc import Callable, Sequence
@@ -313,6 +314,247 @@ _register(
         args_model=NoArgs,
         scope="commit",
         run=read_workflow,
+    )
+)
+
+
+# --- log tools --------------------------------------------------------------------------
+
+READ_LOG_MAX_LINES = 150
+SEARCH_DEFAULT_MATCHES = 20
+SEARCH_MAX_MATCHES = 50
+SEARCH_PATTERN_MAX_CHARS = 200
+SEARCH_DEADLINE_S = 2.0
+# Python's re cannot be interrupted mid-match, so risky patterns are refused up front.
+# Measured on one 500-char line:
+# - backreferences, and alternation or repetition inside an unbounded repeat ("(a|aa)*",
+#   "(a+)+"): exponential, never finishes;
+# - three unbounded repeats over broad items (".", negated sets, \S \W \D) such as
+#   ".*a.*b.*c": ~0.9 s (four: ~13 s); two such as ".*.*z": ~27 ms;
+# - three unbounded repeats in a row ("x*x*x*y"): ~3.5 s.
+# Repeats over narrow, separated items ("[a-z_]+\.dart:\d+:\d+") stay well under 1 ms.
+# Each line is matched on its first MAX_LINE_CHARS characters (as the excerpt shows it),
+# so an accepted pattern costs at most tens of ms per line, and the scan stops at
+# SEARCH_DEADLINE_S, checked between lines.
+MAX_BROAD_REPEATS = 2
+MAX_ADJACENT_REPEATS = 2
+LARGE_REPEAT = 100
+"""A {m,n} repeat with n above this counts as unbounded."""
+
+_sre_parser: Any = importlib.import_module("re._parser")
+_sre_constants: Any = importlib.import_module("re._constants")
+_BACKREFERENCES = frozenset(
+    {"GROUPREF", "GROUPREF_EXISTS", "GROUPREF_IGNORE", "GROUPREF_LOC_IGNORE", "GROUPREF_UNI_IGNORE"}
+)
+_REPEATS = frozenset({"MAX_REPEAT", "MIN_REPEAT", "POSSESSIVE_REPEAT"})
+_NEGATED_CATEGORIES = frozenset({"CATEGORY_NOT_DIGIT", "CATEGORY_NOT_SPACE", "CATEGORY_NOT_WORD"})
+
+
+def _is_broad(item: Any) -> bool:
+    r"""Whether a repeated item matches most characters: ".", a negated set, \S, \W, \D.
+    Groups count as broad (conservative)."""
+    if len(item) != 1:
+        return True
+    op, value = item[0]
+    name = str(op)
+    if name == "ANY":
+        return True
+    if name == "IN":
+        return any(
+            str(o) == "NEGATE" or (str(o) == "CATEGORY" and str(v) in _NEGATED_CATEGORIES)
+            for o, v in value
+        )
+    return name != "LITERAL"
+
+
+def _check_tree(items: Any, inside_unbounded: bool, multiplier: int, broad: list[int]) -> None:
+    adjacent = 0
+    for op, value in items:
+        name = str(op)
+        if name in _BACKREFERENCES:
+            raise ToolError("backreferences are not allowed in search patterns")
+        is_unbounded_repeat = False
+        if name in _REPEATS:
+            _, high, item = value
+            unbounded = high == _sre_constants.MAXREPEAT or high > LARGE_REPEAT
+            if inside_unbounded and high > 1:
+                raise ToolError("nested repetition (like (a+)+) is not allowed; simplify")
+            if unbounded:
+                is_unbounded_repeat = True
+                if _is_broad(item):
+                    broad[0] += multiplier
+                _check_tree(item, True, multiplier, broad)
+            else:
+                _check_tree(item, inside_unbounded, multiplier * max(high, 1), broad)
+        elif name == "BRANCH":
+            if inside_unbounded:
+                raise ToolError("alternation inside a repeated group is not allowed; simplify")
+            for alternative in value[1]:
+                _check_tree(alternative, inside_unbounded, multiplier, broad)
+        elif name == "SUBPATTERN":
+            _check_tree(value[3], inside_unbounded, multiplier, broad)
+        elif name in ("ASSERT", "ASSERT_NOT"):
+            _check_tree(value[1], inside_unbounded, multiplier, broad)
+        elif name == "ATOMIC_GROUP":
+            _check_tree(value, inside_unbounded, multiplier, broad)
+        adjacent = adjacent + 1 if is_unbounded_repeat else 0
+        if adjacent > MAX_ADJACENT_REPEATS:
+            raise ToolError(
+                f"more than {MAX_ADJACENT_REPEATS} unbounded repeats in a row; simplify"
+            )
+    if broad[0] > MAX_BROAD_REPEATS:
+        raise ToolError(
+            f"more than {MAX_BROAD_REPEATS} unbounded repeats of broad items"
+            " (., [^...], \\S, \\W, \\D); use literal anchors or narrower classes"
+        )
+
+
+def compile_search_pattern(pattern: str, ignore_case: bool) -> re.Pattern[str]:
+    """`pattern` compiled, or ToolError if it is invalid or could backtrack badly."""
+    if not pattern:
+        raise ToolError("pattern is empty")
+    if len(pattern) > SEARCH_PATTERN_MAX_CHARS:
+        raise ToolError(f"pattern is longer than {SEARCH_PATTERN_MAX_CHARS} characters")
+    flags = re.IGNORECASE if ignore_case else 0
+    try:
+        compiled = re.compile(pattern, flags)
+        tree = _sre_parser.parse(pattern, flags)
+    except (re.error, RecursionError, OverflowError) as exc:
+        raise ToolError(f"invalid regex: {exc}") from None
+    _check_tree(tree, inside_unbounded=False, multiplier=1, broad=[0])
+    return compiled
+
+
+@dataclass(frozen=True)
+class SearchResult:
+    matches: list[int]
+    """1-based numbers of the matching lines shown (at most max_matches)."""
+    total: int
+    """Matching lines found (including those not shown)."""
+    stopped_at: int | None = None
+    """The line the scan stopped before, when it ran out of time."""
+
+
+def search_lines(
+    lines: Sequence[str],
+    regex: re.Pattern[str],
+    max_matches: int,
+    deadline_s: float = SEARCH_DEADLINE_S,
+    clock: Callable[[], float] = time.monotonic,
+) -> SearchResult:
+    start = clock()
+    matches: list[int] = []
+    total = 0
+    for number, line in enumerate(lines, start=1):
+        if clock() - start > deadline_s:
+            return SearchResult(matches, total, stopped_at=number)
+        if regex.search(line[:MAX_LINE_CHARS]):
+            total += 1
+            if len(matches) < max_matches:
+                matches.append(number)
+    return SearchResult(matches, total)
+
+
+class SearchLogArgs(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    pattern: str
+    max_matches: int = Field(SEARCH_DEFAULT_MATCHES, ge=1, le=SEARCH_MAX_MATCHES)
+    ignore_case: bool = True
+
+
+def search_log(env: ToolEnv, args: SearchLogArgs) -> str:
+    regex = compile_search_pattern(args.pattern, args.ignore_case)
+    lines = env.ctx.log_lines
+    found = search_lines(lines, regex, args.max_matches)
+    shown = len(found.matches)
+    if found.total == 0:
+        header = f"no lines match /{args.pattern}/ in {len(lines)} log lines"
+    elif shown < found.total:
+        header = f"first {shown} of {found.total} lines matching /{args.pattern}/"
+    else:
+        header = f"{found.total} lines match /{args.pattern}/"
+    rows = [f"L{n}| {_clip_line(lines[n - 1])}" for n in found.matches]
+    footer = []
+    if found.stopped_at is not None:
+        footer.append(
+            f"(search stopped after {SEARCH_DEADLINE_S:g}s before line {found.stopped_at}"
+            f" of {len(lines)}; use a narrower pattern)"
+        )
+    return "\n".join([header, *rows, *footer])
+
+
+_register(
+    ToolSpec(
+        name="search_log",
+        description=(
+            "Search the FULL job log (not just the excerpt) with a Python regular expression;"
+            ' returns matching lines as "L<n>| <line>", numbered like the excerpt.'
+            " Case-insensitive unless ignore_case is false. Backreferences, nested repeats"
+            " and more than two unbounded repeats are refused."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "pattern": {"type": "string", "description": "A Python regex."},
+                "max_matches": {
+                    "type": "integer",
+                    "description": f"Lines to return (1-{SEARCH_MAX_MATCHES}).",
+                },
+                "ignore_case": {"type": "boolean"},
+            },
+            "required": ["pattern"],
+        },
+        args_model=SearchLogArgs,
+        scope="job",
+        run=search_log,
+        needs_github=False,
+    )
+)
+
+
+class ReadLogArgs(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    start_line: int = Field(ge=1)
+    end_line: int = Field(ge=1)
+
+
+def read_log(env: ToolEnv, args: ReadLogArgs) -> str:
+    lines = env.ctx.log_lines
+    total = len(lines)
+    if args.end_line < args.start_line:
+        raise ToolError("end_line is before start_line")
+    if args.start_line > total:
+        raise ToolError(f"start_line {args.start_line} is past the end (the log has {total} lines)")
+    end = min(args.end_line, args.start_line + READ_LOG_MAX_LINES - 1, total)
+    rows = [f"L{n}| {_clip_line(lines[n - 1])}" for n in range(args.start_line, end + 1)]
+    header = f"log lines {args.start_line}-{end} of {total}"
+    footer = []
+    if end < args.end_line and end < total:
+        footer.append(f"(at most {READ_LOG_MAX_LINES} lines per call; continue at {end + 1})")
+    return "\n".join([header, *rows, *footer])
+
+
+_register(
+    ToolSpec(
+        name="read_log",
+        description=(
+            'Read raw lines of the FULL job log by line number (the N in "L<N>|"), e.g. the'
+            f' lines behind "... (N lines omitted)". At most {READ_LOG_MAX_LINES} per call.'
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "start_line": {"type": "integer"},
+                "end_line": {"type": "integer", "description": "Inclusive."},
+            },
+            "required": ["start_line", "end_line"],
+        },
+        args_model=ReadLogArgs,
+        scope="job",
+        run=read_log,
+        needs_github=False,
     )
 )
 
