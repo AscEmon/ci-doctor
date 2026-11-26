@@ -156,8 +156,10 @@ def test_dry_run_estimates_every_model_call_at_the_worst_case(
     ]
     expected = sum(len(estimate_item_calls(setup.prompt, log, setup.limits)) for log in logs)
     assert 3 < expected <= 3 * 4
-    assert dry_rows(result.output)["model calls (worst case)"] == str(expected)
-    assert "(4 model calls)" in result.output
+    rows = dry_rows(result.output)
+    assert rows["items"] == "3"
+    assert rows["model calls (worst case)"] == str(expected)
+    assert "at most 4 model calls" in result.output
     assert not run_files(data_dir)
 
 
@@ -172,6 +174,7 @@ def test_dry_run_counts_cached_agent_items_as_free(
 
     assert result.exit_code == 0, result.output
     rows = dry_rows(result.output)
+    assert rows["items"] == "3"
     assert rows["cached (free)"] == "3"
     assert rows["model calls (worst case)"] == "0"
 

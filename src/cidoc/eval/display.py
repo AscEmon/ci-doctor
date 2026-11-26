@@ -175,10 +175,10 @@ def render_estimate(
     ]
     if max_steps is not None:
         notes.append(
-            f"Agent: each uncached item is counted at its worst case, {max_steps} tool"
-            f" rounds and the final submit ({max_steps + 1} model calls), each resending the"
-            " conversation; most items stop sooner. GitHub calls for tools are free but"
-            " not counted."
+            f"Agent: each uncached item is counted at its worst case: up to {max_steps}"
+            f" tool rounds and the final submit (at most {max_steps + 1} model calls), each"
+            " resending the conversation, until the per-item input-token cap is reached;"
+            " most items stop sooner. GitHub calls for tools are free and not counted."
         )
     if price is None and estimate.calls:
         notes.append(f"No price configured for {model}: set CIDOC_PRICES.")

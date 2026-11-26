@@ -316,7 +316,9 @@ def eval_command(
             )
         else:
             plan = plan_run(loaded.cases, prompt, cache, name, budget, refresh=refresh)
-        estimate = estimate_run(plan.calls, plan.cached, price, settings.cidoc_rpm)
+        estimate = estimate_run(
+            plan.calls, plan.cached, price, settings.cidoc_rpm, items=len(loaded.cases)
+        )
         render_estimate(
             console,
             name,

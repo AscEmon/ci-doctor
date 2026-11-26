@@ -101,13 +101,18 @@ class RunEstimate:
 
 
 def estimate_run(
-    calls: list[CallEstimate], cached: int, price: Price | None, rpm: int
+    calls: list[CallEstimate],
+    cached: int,
+    price: Price | None,
+    rpm: int,
+    items: int | None = None,
 ) -> RunEstimate:
-    """What a run would cost: one call per uncached item."""
+    """What a run would cost: `calls` for the uncached items (one per item unless
+    `items` says how many there are, as for agent runs with several calls each)."""
     input_tokens = sum(c.input_tokens for c in calls)
     output_tokens = sum(c.output_tokens for c in calls)
     return RunEstimate(
-        items=len(calls) + cached,
+        items=items if items is not None else len(calls) + cached,
         cached=cached,
         calls=len(calls),
         input_tokens=input_tokens,
