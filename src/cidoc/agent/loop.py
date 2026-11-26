@@ -24,7 +24,7 @@ from typing import Any
 
 from pydantic import ValidationError
 
-from cidoc.agent.prompt import SUBMIT_FUNCTION, AgentPrompt
+from cidoc.agent.prompt import SUBMIT_FUNCTION, AgentPrompt, wrap_tool_result
 from cidoc.agent.tools import OUTPUT_CAP_TOKENS, ToolBox, ToolOutput
 from cidoc.agent.trajectory import (
     FAILED,
@@ -79,10 +79,6 @@ class AgentLimits:
 
 
 ResultWrapper = Callable[[ToolOutput], str]
-
-
-def plain_result(output: ToolOutput) -> str:
-    return output.text
 
 
 def parse_submit(args: dict[str, Any], total_lines: int) -> AgentDiagnosis:
@@ -152,7 +148,7 @@ def run_agent(
     tools: ToolBox,
     limits: AgentLimits = AgentLimits(),  # noqa: B008 - frozen
     price: Price | None = None,
-    wrap: ResultWrapper = plain_result,
+    wrap: ResultWrapper = wrap_tool_result,
 ) -> AnalysisResult:
     run = _Run()
     messages: list[Message] = [UserMessage(prompt.user(log))]
@@ -304,7 +300,7 @@ def run_agent_cached(
     cache: ResponseCache,
     limits: AgentLimits = AgentLimits(),  # noqa: B008 - frozen
     price: Price | None = None,
-    wrap: ResultWrapper = plain_result,
+    wrap: ResultWrapper = wrap_tool_result,
     refresh: bool = False,
 ) -> AnalysisResult:
     """The cached result if there is one (unless `refresh`), else run and store it."""

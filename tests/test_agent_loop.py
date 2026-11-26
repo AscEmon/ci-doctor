@@ -126,7 +126,12 @@ def test_tool_results_are_sent_back_and_recorded() -> None:
     first = trajectory.tool_calls[0]
     assert first.args == {"path": "pubspec.yaml", "start_line": 1, "end_line": 200}
     assert first.ok
-    assert first.output_chars == len(results.results[0].response["output"])
+    wrapped = results.results[0].response["output"]
+    assert wrapped.startswith('<tool_result name="read_file">\n')
+    assert wrapped.endswith("\n</tool_result>")
+    assert first.output_chars == len(wrapped) - len(
+        '<tool_result name="read_file">\n\n</tool_result>'
+    )
     assert first.output_tokens > 0
     assert first.preview.startswith("pubspec.yaml @")
     assert trajectory.model_calls == 2
@@ -156,7 +161,7 @@ def test_a_tool_error_is_shown_to_the_model_and_the_run_goes_on() -> None:
 
     assert result.ok
     response = provider.requests[1]["messages"][-1].results[0].response
-    assert response["output"].startswith("error: ")
+    assert response["output"].startswith('<tool_result name="read_file">\nerror: ')
     assert not result.trajectory.tool_calls[0].ok
 
 
