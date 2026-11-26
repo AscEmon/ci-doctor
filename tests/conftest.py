@@ -16,7 +16,13 @@ def data_dir(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterator[Path]:
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("GITHUB_TOKEN", "test-github-token-value")
     monkeypatch.setenv("DATA_DIR", str(tmp_path / "data"))
-    for name in ("GEMINI_API_KEY", "CIDOC_MODEL", "CIDOC_RPM", "CIDOC_TOKEN_BUDGET"):
+    for name in (
+        "GEMINI_API_KEY",
+        "CIDOC_MODEL",
+        "CIDOC_RPM",
+        "CIDOC_TOKEN_BUDGET",
+        "CIDOC_AGENT_MAX_INPUT",
+    ):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.delenv("CIDOC_PRICES", raising=False)
     get_settings.cache_clear()

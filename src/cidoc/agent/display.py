@@ -35,6 +35,9 @@ def trajectory_summary(trajectory: Trajectory) -> str:
         f"{trajectory.input_tokens:,} in / {trajectory.output_tokens:,} out tokens",
         _cost(trajectory.cost),
     ]
+    if trajectory.call_input_tokens:
+        steps = " → ".join(f"{n:,}" for n in trajectory.call_input_tokens)
+        parts.append(f"input per call {steps} (of {trajectory.max_input_tokens:,})")
     if trajectory.forced:
         parts.append("forced submit: " + ", ".join(trajectory.forced))
     return "; ".join(parts)

@@ -40,6 +40,9 @@ class Trajectory:
     tool_calls: list[ToolCallRecord] = field(default_factory=list)
     model_calls: int = 0
     input_tokens: int = 0
+    call_input_tokens: list[int] = field(default_factory=list)
+    """Actual input tokens of each model call, in order (sums to input_tokens); empty in
+    trajectories recorded before it was kept."""
     output_tokens: int = 0
     cost: float | None = None
     """USD for the model calls; None without a configured price."""

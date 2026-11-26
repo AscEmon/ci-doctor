@@ -28,6 +28,8 @@ from cidoc.analyze.schema import EVIDENCE_FILES_MAX, RESPONSE_SCHEMA
 from cidoc.llm.base import FunctionSpec
 
 HASH_CHARS = 12
+HISTORY_POLICY = "compact-answered-results-300"
+"""How earlier tool results are resent (agent.loop); part of the version hash."""
 SUBMIT_FUNCTION = "submit_diagnosis"
 
 
@@ -157,6 +159,7 @@ def build_agent_prompt(
             "tool_result": TOOL_RESULT_TEMPLATE,
             "functions": [[f.name, f.description, f.parameters] for f in functions],
             "limits": [max_steps, max_input_tokens, cap_tokens],
+            "history": HISTORY_POLICY,
         },
         sort_keys=True,
     )

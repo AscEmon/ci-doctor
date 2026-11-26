@@ -62,6 +62,10 @@ output) and the final diagnosis, including the repository files it relied on.
 - `--max-steps N` caps tool calls (default 6); after that the model must answer.
 - `--tools a,b,...` offers only those tools (for ablations); default all.
 - `--no-call` prints the system instruction, the excerpt and the tool list, no API call.
+- `CIDOC_AGENT_MAX_INPUT` caps the input tokens of all model calls of one item (default
+  80,000). Tool results the model has already answered are resent compacted (first 300
+  characters and their size); the latest results always go in full. The trajectory shows
+  each call's input tokens.
 
 `uv run cidoc eval --agent [--max-steps N] [--tools ...]` scores the agent on the same
 labels; the run file records `agent`, the tool set and `max_steps`, and adds tool calls

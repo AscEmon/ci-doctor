@@ -5,9 +5,12 @@ Limits, per item:
 - max_steps tool calls (default 6). Once they are used up, the next model call is
   forced to submit_diagnosis (function calling mode ANY, only that function allowed).
   Extra calls in the same turn are answered "not run" so every call gets a result.
-- max_input_tokens over all model calls (default 30,000, actual usage). A model call
-  that might be followed by a tool round is made only if a forced submit after that
-  round would still fit; otherwise this call is the forced submit.
+- max_input_tokens over all model calls (default 80,000, CIDOC_AGENT_MAX_INPUT; actual
+  usage). A model call that might be followed by a tool round is made only if a forced
+  submit after that round would still fit; otherwise this call is the forced submit.
+- History size: every call resends the conversation, so once the model has answered a
+  tool result, later calls carry only a compact version of it (its first COMPACT_CHARS
+  characters and its size). The latest tool results are always sent in full.
 - A turn with text and no function call is re-prompted once, forcing submit_diagnosis.
 - submit_diagnosis arguments are validated with the Phase 1 Diagnosis model (plus
   evidence_files); an invalid answer is rejected back to the model once, forced again.
@@ -19,7 +22,7 @@ API errors (after the provider's backoff) propagate, as in Phase 1.
 import hashlib
 import json
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from pydantic import ValidationError
@@ -51,7 +54,9 @@ from cidoc.llm.base import (
 from cidoc.llm.pricing import Price
 
 DEFAULT_MAX_STEPS = 6
-DEFAULT_MAX_INPUT_TOKENS = 30_000
+DEFAULT_MAX_INPUT_TOKENS = 80_000
+"""Also the default of CIDOC_AGENT_MAX_INPUT (config.Settings)."""
+COMPACT_CHARS = 300
 EXTRA_MODEL_CALLS = 3
 """Model calls beyond max_steps: the forced submit, a text re-prompt, a validation retry."""
 
@@ -118,6 +123,22 @@ def estimate_input(system: str, functions_json: str, messages: list[Message]) ->
     )
 
 
+def compact_text(text: str) -> str:
+    """A tool result the model has already seen: its start and its size."""
+    if len(text) <= COMPACT_CHARS:
+        return text
+    return f"{text[:COMPACT_CHARS]} ... ({len(text)} chars, full result shown earlier)"
+
+
+def sent_view(messages: list[Message], compact: dict[int, FunctionResultsMessage]) -> list[Message]:
+    """The conversation as sent: tool results before the latest ones are compacted."""
+    latest = max(
+        (i for i, m in enumerate(messages) if isinstance(m, FunctionResultsMessage)),
+        default=-1,
+    )
+    return [compact.get(i, m) if i != latest else m for i, m in enumerate(messages)]
+
+
 def _raw_output(response: ToolCallResponse) -> str:
     """The model's turn, for inspection: its text and function calls."""
     return json.dumps(
@@ -153,6 +174,8 @@ def run_agent(
 ) -> AnalysisResult:
     run = _Run()
     messages: list[Message] = [UserMessage(prompt.user(log))]
+    compact: dict[int, FunctionResultsMessage] = {}
+    """index in `messages` -> that tool-results message with compacted outputs"""
     functions_json = json.dumps([[f.name, f.description, f.parameters] for f in prompt.functions])
     force_reason: str | None = None
     reprompted = retried = False
@@ -160,11 +183,12 @@ def run_agent(
     diagnosis: AgentDiagnosis | None = None
 
     for turn in range(1, limits.max_model_calls + 1):
+        sent = sent_view(messages, compact)
         if force_reason is None:
             if run.steps >= limits.max_steps:
                 force_reason, run.hit_max_steps = FORCED_MAX_STEPS, True
             else:
-                next_input = estimate_input(prompt.system, functions_json, messages)
+                next_input = estimate_input(prompt.system, functions_json, sent)
                 after_round = next_input + limits.cap_tokens
                 if run.input_tokens + next_input + after_round > limits.max_input_tokens:
                     force_reason = FORCED_MAX_INPUT
@@ -173,7 +197,7 @@ def run_agent(
         forcing = force_reason is not None
         response = provider.generate_with_tools(
             prompt.system,
-            messages,
+            sent,
             prompt.functions,
             force=[SUBMIT_FUNCTION] if forcing else None,
         )
@@ -217,14 +241,20 @@ def run_agent(
             continue
 
         results: list[FunctionResult] = []
+        compacted: list[FunctionResult] = []
         for call in response.function_calls:
             if forcing or run.steps >= limits.max_steps:
-                results.append(FunctionResult(call, {"error": NOT_RUN_LIMIT}))
+                result = FunctionResult(call, {"error": NOT_RUN_LIMIT})
+                results.append(result)
+                compacted.append(result)
                 continue
             run.steps += 1
             output = tools.call(call.name, call.args)
             run.records.append(_record(run.steps, turn, output))
             results.append(FunctionResult(call, {"output": wrap(output)}))
+            short = replace(output, text=compact_text(output.text))
+            compacted.append(FunctionResult(call, {"output": wrap(short)}))
+        compact[len(messages)] = FunctionResultsMessage(compacted)
         messages.append(FunctionResultsMessage(results))
     else:
         failure = failure or "no valid submit_diagnosis within the model-call limit"
@@ -236,6 +266,7 @@ def run_agent(
         tool_calls=run.records,
         model_calls=len(run.calls),
         input_tokens=run.input_tokens,
+        call_input_tokens=[c.input_tokens for c in run.calls],
         output_tokens=sum(c.output_tokens for c in run.calls),
         cost=price.cost(run.input_tokens, sum(c.output_tokens for c in run.calls))
         if price

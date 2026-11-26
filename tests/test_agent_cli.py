@@ -154,3 +154,18 @@ def test_a_failed_agent_run_exits_1(
 
     assert result.exit_code == 1
     assert "analysis failed" in result.output
+
+
+def test_input_cap_comes_from_cidoc_agent_max_input(
+    data_dir: Path, monkeypatch: pytest.MonkeyPatch, github: FakeGitHub
+) -> None:
+    store_job(data_dir, 42, log_text())
+    monkeypatch.setenv("CIDOC_AGENT_MAX_INPUT", "3000")  # below one call: forced at once
+    provider = script(monkeypatch, turn(submit()))
+
+    result = run("42", "--agent")
+
+    assert result.exit_code == 0, result.output
+    assert provider.requests[0]["force"] == ["submit_diagnosis"]
+    assert "forced submit: max_input_tokens" in result.output
+    assert "input per call 1,000 (of 3,000)" in result.output

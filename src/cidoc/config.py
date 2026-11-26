@@ -36,6 +36,8 @@ class Settings(BaseSettings):
     """Requests per minute sent to the LLM API."""
     cidoc_token_budget: PositiveInt = DEFAULT_TOKEN_BUDGET
     """Estimated tokens of preprocessed log sent per analysis."""
+    cidoc_agent_max_input: PositiveInt = 80_000
+    """Agent: total input tokens over all model calls of one item (agent.loop default)."""
     cidoc_prices: dict[str, Price] = {}
     """USD per million tokens by model, as JSON. Never hardcoded: prices change."""
 

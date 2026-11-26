@@ -8,11 +8,14 @@ fit, so the budget is not spent on an item that would be cut off half way.
 import json
 from collections.abc import Sequence
 
-from cidoc.agent.loop import AgentLimits, estimate_input
+from cidoc.agent.loop import COMPACT_CHARS, AgentLimits, estimate_input
 from cidoc.agent.prompt import AgentPrompt
 from cidoc.analyze.costguard import CallEstimate, CostGuard
 from cidoc.analyze.preprocess import PreprocessedLog, estimate_tokens
 from cidoc.llm.base import FunctionSpec, Message, ToolCallingProvider, ToolCallResponse
+
+# A compacted result: COMPACT_CHARS of text, the size note and the <tool_result> tags.
+COMPACT_RESULT_TOKENS = estimate_tokens("x" * (COMPACT_CHARS + 120))
 
 
 def _functions_json(functions: Sequence[FunctionSpec]) -> str:
@@ -24,8 +27,9 @@ def estimate_item_calls(
 ) -> list[CallEstimate]:
     """Worst-case model calls for one item: one per tool step plus the final submit.
 
-    Each call resends the conversation, so call k carries k tool results (each at most
-    cap_tokens); the total stays within max_input_tokens, as the loop enforces.
+    Each call resends the conversation: call k carries the latest tool result in full
+    (at most cap_tokens) and the k - 1 earlier ones compacted; the total stays within
+    max_input_tokens, as the loop enforces.
     """
     first = (
         estimate_tokens(prompt.system)
@@ -35,7 +39,7 @@ def estimate_item_calls(
     calls: list[CallEstimate] = []
     spent = 0
     for k in range(limits.max_steps + 1):
-        size = first + k * limits.cap_tokens
+        size = first + (limits.cap_tokens + (k - 1) * COMPACT_RESULT_TOKENS if k else 0)
         if calls and spent + size > limits.max_input_tokens:
             break
         calls.append(CallEstimate(input_tokens=size))

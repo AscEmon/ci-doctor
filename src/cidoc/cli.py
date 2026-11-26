@@ -285,7 +285,11 @@ def eval_command(
     if baseline and agent:
         console.print(f"[red]--agent needs an LLM model, not {REGEX_BASELINE}.[/red]")
         raise typer.Exit(2)
-    setup = agent_setup(prompt, tool_names, max_steps) if agent else None
+    setup = (
+        agent_setup(prompt, tool_names, max_steps, settings.cidoc_agent_max_input)
+        if agent
+        else None
+    )
     price = settings.price_for(name)
     if max_cost is not None and not baseline and price is None:
         console.print(Text(f"--max-cost needs a price for {name}: set CIDOC_PRICES.", "red"))
@@ -567,7 +571,7 @@ def analyze_agent(
             Text("--agent needs a stored job id: its tools read the job's run and repo.", "red")
         )
         raise typer.Exit(2)
-    setup = agent_setup(base, tool_names, max_steps)
+    setup = agent_setup(base, tool_names, max_steps, settings.cidoc_agent_max_input)
     log = preprocess(source.text, source.failed_steps, budget or settings.cidoc_token_budget)
     console.print(
         Text(

@@ -454,3 +454,105 @@ def test_fix_sha_never_reaches_a_tool_a_prompt_or_github(tmp_path: Path) -> None
         assert needle not in sent
         assert needle not in json.dumps(github.calls)
         assert needle not in repr(result)
+
+
+# --- history size -------------------------------------------------------------------------
+
+BIG = "".join(f"line {n:03d} " + "x" * 60 + "\n" for n in range(1, 101))  # ~7 KB
+
+
+def big_files_toolbox() -> ToolBox:
+    github = FakeGitHub({contents("a.txt"): file_entry(BIG), contents("b.txt"): file_entry(BIG)})
+    return ToolBox(ToolEnv(context(clean_log(LOG)), github), cap_tokens=100_000)
+
+
+def output_of(request: dict[str, Any], index: int) -> str:
+    text: str = request["messages"][index].results[0].response["output"]
+    return text
+
+
+def test_answered_tool_results_are_compacted_the_latest_is_sent_in_full() -> None:
+    provider = ScriptedToolProvider(
+        turn(("read_file", {"path": "a.txt"})),
+        turn(("read_file", {"path": "b.txt"})),
+        turn(submit()),
+    )
+
+    run_agent(provider, excerpt(), agent_prompt(), big_files_toolbox())
+
+    second, third = provider.requests[1], provider.requests[2]
+    full_a = output_of(second, 2)
+    assert "line 100" in full_a  # latest result: in full
+    compact_a, full_b = output_of(third, 2), output_of(third, 4)
+    assert "line 100" in full_b
+    assert "line 100" not in compact_a
+    inner = len(full_a) - len('<tool_result name="read_file">\n\n</tool_result>')
+    assert f"({inner} chars, full result shown earlier)" in compact_a
+    assert compact_a.startswith('<tool_result name="read_file">\na.txt @')
+    assert compact_a.endswith("\n</tool_result>")  # tags stay closed
+    assert len(compact_a) < 300 + 120
+
+
+def test_short_results_and_errors_are_not_changed_by_compaction() -> None:
+    provider = ScriptedToolProvider(
+        turn(("read_log", {"start_line": 1, "end_line": 2})),
+        turn(("read_file", {"path": "../x"})),
+        turn(submit()),
+    )
+
+    run_agent(provider, excerpt(), agent_prompt(), toolbox())
+
+    first, third = provider.requests[1], provider.requests[2]
+    assert output_of(third, 2) == output_of(first, 2)
+
+
+def test_compaction_shrinks_the_estimate_that_drives_the_budget() -> None:
+    limits = AgentLimits(max_input_tokens=80_000)
+    provider = ScriptedToolProvider(
+        *[turn(("read_file", {"path": "a.txt"}), usage=Usage(6000, 10, 0.1)) for _ in range(6)],
+        turn(submit()),
+    )
+
+    result = run_agent(provider, excerpt(), agent_prompt(limits), big_files_toolbox(), limits)
+
+    assert result.ok
+    assert result.trajectory is not None
+    assert len(result.trajectory.tool_calls) == 6  # all steps fit: not forced by tokens
+    assert result.trajectory.forced == [FORCED_MAX_STEPS]
+    last = provider.requests[-1]["messages"]
+    sent = sum(len(json.dumps(m.results[0].response)) for m in last[2::2])
+    assert sent < 6 * len(BIG)  # five compacted + one full, not six full
+
+
+def test_per_call_input_tokens_are_recorded() -> None:
+    provider = ScriptedToolProvider(
+        turn(READ_PUBSPEC, usage=Usage(5000, 10, 0.1)),
+        turn(submit(), usage=Usage(5600, 10, 0.1)),
+    )
+
+    result = agent(provider)
+
+    assert result.trajectory.call_input_tokens == [5000, 5600]
+    assert result.trajectory.input_tokens == 10_600
+
+
+def test_the_default_input_cap_is_80k_and_matches_the_setting() -> None:
+    from cidoc.agent.loop import DEFAULT_MAX_INPUT_TOKENS
+    from cidoc.config import Settings
+
+    assert DEFAULT_MAX_INPUT_TOKENS == 80_000
+    assert AgentLimits().max_input_tokens == 80_000
+    assert Settings.model_fields["cidoc_agent_max_input"].default == DEFAULT_MAX_INPUT_TOKENS
+
+
+def test_worst_case_estimate_counts_earlier_results_compacted() -> None:
+    from cidoc.agent.budget import COMPACT_RESULT_TOKENS, estimate_item_calls
+
+    limits = AgentLimits(max_steps=3)
+    calls = estimate_item_calls(agent_prompt(limits), excerpt(), limits)
+
+    sizes = [c.input_tokens for c in calls]
+    assert len(sizes) == 4
+    assert sizes[1] - sizes[0] == limits.cap_tokens
+    assert sizes[2] - sizes[1] == COMPACT_RESULT_TOKENS
+    assert sizes[3] - sizes[2] == COMPACT_RESULT_TOKENS
