@@ -18,10 +18,11 @@ from typing import Any
 
 from pydantic import ValidationError
 
+from cidoc.agent.trajectory import trajectory_from_dict, trajectory_to_dict
 from cidoc.analyze.analyzer import AnalysisResult, analyze_log
 from cidoc.analyze.preprocess import PreprocessedLog
 from cidoc.analyze.prompt import Prompt
-from cidoc.analyze.schema import Diagnosis
+from cidoc.analyze.schema import AgentDiagnosis, Diagnosis
 from cidoc.llm.base import LLMProvider, Usage
 
 CACHE_DIRNAME = "cache/analyze"
@@ -41,23 +42,34 @@ def cache_key(prompt_version: str, log_digest: str, model: str) -> str:
 
 
 def result_to_dict(result: AnalysisResult) -> dict[str, Any]:
-    return {
+    data: dict[str, Any] = {
         "model": result.model,
         "diagnosis": result.diagnosis.model_dump() if result.diagnosis else None,
         "failure": result.failure,
         "calls": [asdict(call) for call in result.calls],
         "outputs": result.outputs,
     }
+    if result.trajectory is not None:  # agent runs only; Phase 1 entries are unchanged
+        data["trajectory"] = trajectory_to_dict(result.trajectory)
+    return data
+
+
+def _diagnosis_from_dict(data: dict[str, Any]) -> Diagnosis:
+    if "evidence_files" in data:
+        return AgentDiagnosis.model_validate(data)
+    return Diagnosis.model_validate(data)
 
 
 def result_from_dict(data: dict[str, Any]) -> AnalysisResult:
     diagnosis = data["diagnosis"]
+    trajectory = data.get("trajectory")
     return AnalysisResult(
         model=data["model"],
-        diagnosis=Diagnosis.model_validate(diagnosis) if diagnosis is not None else None,
+        diagnosis=_diagnosis_from_dict(diagnosis) if diagnosis is not None else None,
         failure=data["failure"],
         calls=[Usage(**call) for call in data["calls"]],
         outputs=list(data.get("outputs", [])),  # absent in entries cached before they were kept
+        trajectory=trajectory_from_dict(trajectory) if trajectory is not None else None,
     )
 
 

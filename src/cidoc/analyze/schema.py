@@ -3,6 +3,7 @@
 The category enum comes from the labeling taxonomy (labels.CATEGORIES), the single source.
 """
 
+import re
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, PositiveInt, field_validator
@@ -60,3 +61,23 @@ class Diagnosis(BaseModel):
         if not value.strip():
             raise ValueError("must not be blank")
         return value.strip()
+
+
+EVIDENCE_FILES_MAX = 10
+_EVIDENCE_FILE = re.compile(r"^\S[^\n]*:\d+$")
+
+
+class AgentDiagnosis(Diagnosis):
+    """The agent's answer (submit_diagnosis): a Diagnosis plus the repository files it
+    relied on. Phase 1 fields are validated exactly as for Diagnosis."""
+
+    evidence_files: list[str] = Field(default_factory=list, max_length=EVIDENCE_FILES_MAX)
+    """"path:line" strings, e.g. "android/app/build.gradle:12"; may be empty."""
+
+    @field_validator("evidence_files")
+    @classmethod
+    def _path_and_line(cls, value: list[str]) -> list[str]:
+        bad = [item for item in value if not _EVIDENCE_FILE.match(item.strip())]
+        if bad:
+            raise ValueError(f'each entry must be "path:line", got {bad[:3]}')
+        return [item.strip() for item in value]

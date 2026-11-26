@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 
 from pydantic import ValidationError
 
+from cidoc.agent.trajectory import Trajectory
 from cidoc.analyze.preprocess import PreprocessedLog
 from cidoc.analyze.prompt import Prompt
 from cidoc.analyze.schema import RESPONSE_SCHEMA, Diagnosis
@@ -34,6 +35,8 @@ class AnalysisResult:
     """The model's raw text for each call, for inspection (may be invalid or empty)."""
     cached: bool = False
     """Read from the response cache: no call was made this time."""
+    trajectory: Trajectory | None = None
+    """Agent runs only: tool calls and model-call totals. None for Phase 1."""
 
     @property
     def ok(self) -> bool:

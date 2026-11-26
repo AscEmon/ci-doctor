@@ -1,13 +1,22 @@
 """Test doubles for the agent: a fake GitHub API and a fixed run context. No network."""
 
 import base64
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from typing import Any
 
 import httpx
 
 from cidoc.agent.context import RunContext
 from cidoc.github_client import RetryableHTTPError
+from cidoc.llm.base import (
+    FunctionCall,
+    FunctionSpec,
+    Message,
+    ModelMessage,
+    ToolCallResponse,
+    Usage,
+)
+from tests.fakes import VALID_DIAGNOSIS
 
 SHA = "a1b2c3d4e5f6" + "0" * 28
 FIX_SHA = "f1f1f1f1f1f1" + "9" * 28
@@ -75,3 +84,63 @@ def context(log_lines: list[str] | None = None, **overrides: Any) -> RunContext:
 
 def contents(path: str) -> str:
     return f"/repos/{REPO}/contents/{path}" if path else f"/repos/{REPO}/contents"
+
+
+# --- scripted tool-calling model ------------------------------------------------------
+
+Call = tuple[str, dict[str, Any]]
+
+
+def turn(
+    *calls: Call,
+    text: str = "",
+    usage: Usage | None = None,
+    finish: str = "STOP",
+    block: str | None = None,
+) -> ToolCallResponse:
+    """One model turn: function calls (ids c1, c2, ...) and/or text."""
+    function_calls = [FunctionCall(name, args, f"c{n}") for n, (name, args) in enumerate(calls, 1)]
+    return ToolCallResponse(
+        message=ModelMessage(text, function_calls),
+        complete=finish == "STOP" and block is None,
+        finish_reason=finish,
+        block_reason=block,
+        usage=usage or Usage(1000, 50, 0.4),
+    )
+
+
+def submit(**overrides: Any) -> Call:
+    return ("submit_diagnosis", {**VALID_DIAGNOSIS, **overrides})
+
+
+class ScriptedToolProvider:
+    """Answers generate_with_tools from a script of turns; records every request."""
+
+    def __init__(self, *turns: ToolCallResponse | BaseException, model: str = "fake-model") -> None:
+        self.turns = list(turns)
+        self.requests: list[dict[str, Any]] = []
+        self._model = model
+
+    @property
+    def model(self) -> str:
+        return self._model
+
+    def generate_with_tools(
+        self,
+        system: str,
+        messages: Sequence[Message],
+        functions: Sequence[FunctionSpec],
+        force: Sequence[str] | None = None,
+    ) -> ToolCallResponse:
+        self.requests.append(
+            {
+                "system": system,
+                "messages": list(messages),
+                "functions": [f.name for f in functions],
+                "force": list(force) if force else None,
+            }
+        )
+        outcome = self.turns.pop(0)
+        if isinstance(outcome, BaseException):
+            raise outcome
+        return outcome
