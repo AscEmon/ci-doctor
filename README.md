@@ -1,94 +1,124 @@
-# ci-doctor
+# CI Doctor for Mobile
 
-## Setup
+**An LLM agent that diagnoses failed CI builds in Flutter, Android and iOS projects, evaluated on a
+human-labeled dataset of real GitHub Actions failures.**
 
-1. Install [uv](https://docs.astral.sh/uv/):
+> Status: research prototype. Phase 0 (data), Phase 1 (LLM analyzer) and Phase 2 (tool-using agent)
+> are complete. A paper draft and dataset release are in progress.
 
-   ```sh
-   brew install uv
-   ```
+---
 
-2. Install Python 3.12 and the project dependencies:
+## Why this project
 
-   ```sh
-   uv sync
-   ```
+- CI builds fail often, and finding the real cause in a long log takes developer time.
+- Mobile CI adds its own failure modes: Gradle and AGP, Xcode and CocoaPods, code signing, app
+  store uploads, and many interacting tool versions.
+- Existing AI tools for CI failures are general-purpose and are not evaluated on mobile projects.
+- There is no public, human-labeled dataset of mobile CI failures to measure such tools against.
 
-3. Create your local env file and fill in real values:
+CI Doctor addresses this with a mobile-focused diagnosis agent, a labeled dataset, and an
+evaluation protocol with frozen prompts and a held-out test set.
 
-   ```sh
-   cp .env.example .env
-   ```
+## Results so far
 
-   | Variable            | Value                                                    |
-   | ------------------- | -------------------------------------------------------- |
-   | `GITHUB_TOKEN`      | GitHub token with read access to Actions on target repos |
-   | `ANTHROPIC_API_KEY` | Anthropic API key (only needed for analyze/eval)        |
+Category accuracy on the **held-out test set (test2, n = 50)**, with the prompt and labeling
+guideline frozen before labeling:
 
-   `.env` and `data/` are gitignored. Never commit them.
+| Method                                    | Accuracy  | Evidence-line hit rate | Input tokens / item |
+| ----------------------------------------- | --------- | ---------------------- | ------------------- |
+| Regex baseline (no LLM)                   | 38.0%     | 34.0%                  | 0                   |
+| **LLM, log only** (Gemini 3.5 Flash-Lite) | **76.0%** | **88.0%**              | ~5K                 |
+| LLM agent, same prompt, no tools          | 74.0%     | 86.0%                  | ~7K                 |
+| LLM agent with read-only tools            | 70.0%     | 86.0%                  | ~16K                |
 
-4. Verify the install:
+Main findings (preliminary, n = 50, margin of error about ±12 points):
 
-   ```sh
-   uv run cidoc --help
-   ```
+1. The LLM doubles the accuracy of a rule-based baseline on unseen failures, and is far better at
+   environment-related causes (registry rate limits, tool-version changes).
+2. The model locates the right log lines 88% of the time; most errors are about choosing the
+   category, not finding the error.
+3. Prompt tuning and label adjudication on the dev set inflated accuracy by about 12 points
+   (dev 87.7% vs. test 76.0%), which is why we report the held-out number.
+4. For a small model, read-only tools gave no accuracy gain while using about 3× the tokens.
+   Prompt and tool effects were separated with a no-tools ablation.
 
-## Labeling
+## Method in brief
 
-Label failed jobs by hand with `uv run cidoc label`, and fix a label with
-`uv run cidoc label edit <job_id>` (or `--last`). Follow the
-[labeling guideline](docs/LABELING_GUIDELINE.md) for how to read a log, what each
-category means, and the ordered decision procedure for choosing one.
+1. **Mining:** discover popular open-source Flutter projects, download logs of failed GitHub
+   Actions jobs (last 90 days), and pair each failure with the next successful run (fix commit).
+2. **Cleaning:** remove framework repos, bots and fork PRs; redact secrets (with an audited,
+   low-false-positive redaction rule).
+3. **Labeling:** a human labels each failure with a category, a one-line root cause, evidence
+   lines and a confidence, following the [labeling guideline](docs/LABELING_GUIDELINE.md)
+   (ordered decision procedure, 14 categories including mobile-specific `store_release`).
+4. **Splits:** `dev` for prompt development, `test1` (older guideline, preliminary), `test2`
+   (clean, main result).
+5. **Analyzer:** deterministic log preprocessing, structured JSON output, prompt-injection-aware
+   system instruction, response cache, cost guard.
+6. **Agent:** read-only tools bound to the failing commit (repo files, workflow, full-log search,
+   sibling jobs, previous run, commit changes). The later fix commit is never shown to the agent.
 
-Each label has a `split` (see the guideline's "Splits and integrity"): `dev` is
-what the prompt is tuned on, and labels written before splits existed are `dev`.
-`test1` is the first held-out batch, and new labels default to `test2`
-(`cidoc label --split dev|test1|test2` overrides this). `uv run cidoc eval` scores
-`dev` by default; use `--split test1`, `--split test2` or `--split all` for the
-others.
+## Repository layout
 
-Re-check dev labels after a guideline change with
-`uv run cidoc label review --category other,ci_config,signing_secrets`. It uses the
-`label edit` flow and never shows model predictions. It refuses `test1`/`test2`.
+| Path                         | Contents                                                                 |
+| ---------------------------- | ------------------------------------------------------------------------ |
+| `src/cidoc/miner/`           | Repo discovery, failed-run mining, fix pairing, filters, redaction audit |
+| `src/cidoc/labeling/`        | Labeling tool, rule-based hints, label storage                           |
+| `src/cidoc/analyze/`         | Log preprocessing, prompt, output schema, cache, cost guard              |
+| `src/cidoc/llm/`             | Provider interface, Gemini client, rate limiting, retries                |
+| `src/cidoc/eval/`            | Regex baseline, metrics, eval runner, run comparison                     |
+| `src/cidoc/agent/`           | Agent tools, loop, trajectory recording, tool cache                      |
+| `docs/LABELING_GUIDELINE.md` | Labeling rulebook and category definitions                               |
+| `tests/`                     | ~590 tests; none use the network                                         |
 
-## Agent (Phase 2)
-
-`uv run cidoc analyze <job_id> --agent` lets the model fetch context beyond the log
-before it answers, through read-only tools bound to the failing commit: `read_file`,
-`list_dir`, `read_workflow`, `search_log`, `read_log`, `sibling_jobs`, `previous_run`
-and `commit_changes`. It prints each tool call (arguments, a short preview of the
-output) and the final diagnosis, including the repository files it relied on.
-
-- `--max-steps N` caps tool calls (default 6); after that the model must answer.
-- `--tools a,b,...` offers only those tools (for ablations); default all. `--tools none`
-  runs the same agent instruction and loop with only `submit_diagnosis`: the checklist
-  reasoning stays, the tool references go, and it gets its own prompt version.
-- `--no-call` prints the system instruction, the excerpt and the tool list, no API call.
-- `CIDOC_AGENT_MAX_INPUT` caps the input tokens of all model calls of one item (default
-  80,000). Tool results the model has already answered are resent compacted (first 300
-  characters and their size); the latest results always go in full. The trajectory shows
-  each call's input tokens.
-
-`uv run cidoc eval --agent [--max-steps N] [--tools ...]` scores the agent on the same
-labels; the run file records `agent`, the tool set and `max_steps`, and adds tool calls
-per item, the share of items that used a tool, tool usage counts, model calls and tokens
-per item, and items that hit `max_steps`. `--dry-run` and `--max-cost` count every
-uncached item at its worst case (`max_steps` tool rounds plus the final answer), and
-`CIDOC_RPM` applies to every model call, agent steps included.
-`cidoc eval --show <run> --job <id>` prints an agent item's full trajectory, and
-`cidoc eval --compare <phase1.json> <agent.json>` compares a Phase 1 run with an agent
-run on the same split, including model calls, tokens and tool calls per item.
-
-Tools use your `GITHUB_TOKEN` (read-only) and nothing else on the network. Their results
-are cached in `data/cache/agent_tools/` and never expire: a commit, a finished run and a
-stored log do not change. The commit that later fixed the failure is never shown to the
-agent. Without `--agent`, `cidoc analyze` is the Phase 1 analyzer, unchanged.
-
-## Development checks
+## Quick start
 
 ```sh
-uv run ruff check .
-uv run ruff format --check .
-uv run mypy
-uv run pytest
+brew install uv            # or see https://docs.astral.sh/uv/
+uv sync
+cp .env.example .env       # set GITHUB_TOKEN (read-only) and GEMINI_API_KEY
+uv run cidoc --help
 ```
+
+Check the code without data or API keys:
+
+```sh
+uv run pytest
+uv run ruff check .
+uv run mypy
+```
+
+Reproduce the pipeline (requires tokens; `data/` is local and gitignored):
+
+```sh
+uv run cidoc mine discover && uv run cidoc mine runs   # collect failed jobs
+uv run cidoc label                                     # label failures
+uv run cidoc eval --model regex-baseline --split test2
+uv run cidoc eval --model gemini-3.5-flash-lite --split test2
+uv run cidoc eval --model gemini-3.5-flash-lite --agent --split test2
+uv run cidoc analyze <job_id> --agent                  # one diagnosis with its tool calls
+```
+
+Every eval run is saved with its prompt version and guideline version, so each reported number
+can be traced to the exact configuration.
+
+## Limitations
+
+- Test set is small (n = 50); one annotator so far (inter-annotator agreement is planned).
+- One small model evaluated; stronger models are next.
+- Data covers popular open-source projects and a 90-day window.
+- The dataset is not yet public; a release of labels and job IDs is planned.
+
+## Roadmap
+
+- [x] Phase 0: dataset and labeling tool
+- [x] Phase 1: LLM analyzer, baseline, held-out evaluation
+- [x] Phase 2: tool-using agent and ablation
+- [ ] Grow the test set, second annotator, stronger-model comparison, paper preprint
+- [ ] Phase 6: security study (prompt injection through CI logs)
+- [ ] Phases 3–5, 7: RAG, fix generation in a sandbox, full benchmark, GitHub App
+
+## Author
+
+Abu Sayed Chowdhury · [Portfolio](https://ascemon.github.io/Portfolio) ·
+ORCID [0009-0004-8061-4447](https://orcid.org/0009-0004-8061-4447)
